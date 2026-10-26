@@ -1,0 +1,18 @@
+# Render.com blueprint: one free web service runs the game AND the online multiplayer server.
+# Render dashboard -> New -> Blueprint -> pick this repo. (Or New -> Web Service with the same commands.)
+services:
+  - type: web
+    name: f1-grand-prix-racer
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # where the game itself is hosted (Netlify). Only used for the link on the server's home page.
+      - key: GAME_URL
+        sync: false
+      - key: NODE_VERSION
+        value: "20"

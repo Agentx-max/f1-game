@@ -1,0 +1,27 @@
+{
+  "name": "f1-gamee",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "start": "node server.js",
+    "serve": "node tools/build.mjs && node -e \"process.env.SERVE='dist';require('./server.js')\"",
+    "test": "node tools/mp-test.mjs",
+    "test:online": "node tools/build.mjs --server=http://127.0.0.1:8097 && node tools/online-test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "three": "^0.170.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

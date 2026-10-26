@@ -1,0 +1,58 @@
+// Circuit metadata. Geometry comes from real-world GPS centrelines in trackdata.js.
+// Elevation profiles are [lapFraction, metres] pairs approximating the real circuits.
+export const TRACKS = [
+  {
+    id: 'it-1922', key: 'monza', name: 'Monza', gp: 'Italian Grand Prix', country: 'Italy', cc: 'ITA',
+    width: 13, style: 'park', laps: 5, runoff: 18,
+    elevation: [[0, 0], [0.3, 4], [0.5, 2], [0.7, -2], [1, 0]],
+    drs: [[0.62, 0.79], [0.93, 0.06]],
+    sun: { elevation: 38, azimuth: 200 }, sky: { turbidity: 4, rayleigh: 1.4 },
+    fog: 0x9fb4c8, ground: 'grass', treeDensity: 1.2, hills: 8,
+    description: 'The Temple of Speed. Long straights, slipstream battles and brave braking into the chicanes.',
+  },
+  {
+    id: 'gb-1948', key: 'silverstone', name: 'Silverstone', gp: 'British Grand Prix', country: 'Great Britain', cc: 'GBR',
+    width: 15, style: 'park', laps: 5, runoff: 22,
+    elevation: [[0, 0], [0.25, 2], [0.5, -1], [0.75, 1], [1, 0]],
+    drs: [[0.94, 0.03], [0.21, 0.31], [0.71, 0.79]],
+    sun: { elevation: 30, azimuth: 150 }, sky: { turbidity: 8, rayleigh: 2.2 },
+    fog: 0xaebccb, ground: 'grass', treeDensity: 0.5, hills: 5,
+    description: 'Home of British motorsport. Flowing high-speed sweeps through Maggotts, Becketts and Chapel.',
+  },
+  {
+    id: 'be-1925', key: 'spa', name: 'Spa-Francorchamps', gp: 'Belgian Grand Prix', country: 'Belgium', cc: 'BEL',
+    width: 12, style: 'park', laps: 3, runoff: 16,
+    elevation: [[0, 0], [0.03, 2], [0.11, -22], [0.15, 4], [0.29, 26], [0.33, 22], [0.37, 9], [0.48, -12], [0.56, -24], [0.64, -38], [0.8, -24], [0.93, -5], [1, 0]],
+    drs: [[0.17, 0.27], [0.95, 0.02]],
+    sun: { elevation: 26, azimuth: 120 }, sky: { turbidity: 6, rayleigh: 2.0 },
+    fog: 0x93a7b6, ground: 'grass', treeDensity: 2.2, hills: 30,
+    description: 'Ardennes rollercoaster. Flat-out through Eau Rouge and Raidillon, up to Les Combes.',
+  },
+  {
+    id: 'at-1969', key: 'austria', name: 'Red Bull Ring', gp: 'Austrian Grand Prix', country: 'Austria', cc: 'AUT',
+    width: 13, style: 'park', laps: 5, runoff: 18,
+    elevation: [[0, 0], [0.1, 10], [0.29, 36], [0.45, 26], [0.6, 16], [0.75, 6], [0.9, 0], [1, 0]],
+    drs: [[0.0, 0.09], [0.13, 0.27], [0.31, 0.43]],
+    sun: { elevation: 45, azimuth: 160 }, sky: { turbidity: 3, rayleigh: 1.2 },
+    fog: 0xa9c2d8, ground: 'grass', treeDensity: 0.9, hills: 90,
+    description: 'Short, fast and set in the Styrian mountains. Three heavy stops and big elevation.',
+  },
+  {
+    id: 'az-2016', key: 'baku', name: 'Baku City Circuit', gp: 'Azerbaijan Grand Prix', country: 'Azerbaijan', cc: 'AZE',
+    width: 12, style: 'street', laps: 4, runoff: 1.6,
+    elevation: [[0, 0], [0.2, 2], [0.3, 8], [0.42, 22], [0.5, 25], [0.6, 18], [0.7, 6], [0.8, 0], [1, 0]],
+    drs: [[0.84, 0.995], [0.1, 0.18]],
+    sun: { elevation: 12, azimuth: 250 }, sky: { turbidity: 9, rayleigh: 2.6 },
+    fog: 0xc7a98c, ground: 'urban', treeDensity: 0.25, hills: 4,
+    description: 'Walls, a 2km flat-out blast along the Caspian and the tight castle section.',
+  },
+  {
+    id: 'mc-1929', key: 'monaco', name: 'Monaco', gp: 'Monaco Grand Prix', country: 'Monaco', cc: 'MON',
+    width: 10, style: 'street', laps: 3, runoff: 1.2,
+    elevation: [[0, 0], [0.05, 1], [0.17, 24], [0.28, 38], [0.33, 30], [0.4, 18], [0.47, 4], [0.6, 1], [0.8, 0], [1, 0]],
+    drs: [[0.95, 0.03]],
+    sun: { elevation: 34, azimuth: 230 }, sky: { turbidity: 3, rayleigh: 1.3 },
+    fog: 0xb6c9da, ground: 'urban', treeDensity: 0.2, hills: 60,
+    description: 'The jewel in the crown. No margin for error between the barriers.',
+  },
+];

@@ -1,0 +1,14 @@
+{
+  "name": "F1 Grand Prix Racer",
+  "short_name": "F1 Racer",
+  "description": "Race the 2018 grid on real-world circuits, right in your browser.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#07070b",
+  "theme_color": "#07070b",
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
