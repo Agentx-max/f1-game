@@ -18,10 +18,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "esbuild": "^0.24.0",
     "three": "^0.170.0",
     "ws": "^8.22.0"
-  },
-  "devDependencies": {
-    "esbuild": "^0.24.0"
   }
 }
