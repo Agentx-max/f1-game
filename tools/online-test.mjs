@@ -53,7 +53,7 @@ try {
   const A = await player('Alice', 9334), B = await player('Bob', 9335);
   const menu = `!document.getElementById('menu').classList.contains('hidden')`;
   check(await A.until(menu, 90000) && await B.until(menu, 90000), 'both games booted');
-  check(await A.ev(`document.getElementById('on-server').value`) === 'http://127.0.0.1:8097', 'server address baked into the build');
+  check(!(await A.ev(`!!document.getElementById('on-server')`)), 'no server address field');
   for (const P of [A, B]) { await P.ev(click('#online-btn')); await P.ev(click('#on-go')); }
   check(await A.until(`!document.getElementById('on-browse').classList.contains('hidden')`) && await B.until(`!document.getElementById('on-browse').classList.contains('hidden')`), 'both connected to the separate server');
   await A.ev(click('#on-create-priv'));

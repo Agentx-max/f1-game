@@ -60,5 +60,5 @@ fs.writeFileSync(path.join(dist, '_headers'), [
 
 const kb = f => (fs.statSync(path.join(dist, f)).size / 1024).toFixed(0) + ' KB';
 console.log(`Built in ${Date.now() - t0} ms -> dist/  (game.js ${kb('game.js')}, index.html ${kb('index.html')}, style.css ${kb('css/style.css')})`);
-console.log(mpServer ? `Online multiplayer server: ${mpServer}` : 'Online multiplayer server: same website (or set one in the ONLINE screen)');
+console.log(mpServer ? `Online multiplayer server: ${mpServer}` : 'Online multiplayer server: https://f1-grand-prix-racer.onrender.com (official)');
 void res;

@@ -4,16 +4,11 @@ import { PROTOCOL } from './lobbycore.mjs';
 export { PROTOCOL };
 const BAKED = typeof __MP_SERVER__ !== 'undefined' ? __MP_SERVER__ : ''; // set at build time: npm run build -- --server=https://...
 
-// Which server to use: ?server=... in the URL > address saved in the Online screen > build default > this website.
+// The official multiplayer server. (Developers can still override it with ?server=... in the URL or npm run build -- --server=...)
+export const OFFICIAL_SERVER = 'https://f1-grand-prix-racer.onrender.com';
 export function serverAddress() {
   const q = new URLSearchParams(location.search).get('server');
-  if (q) return q;
-  return localStorage.getItem('f1gp.mpServer') || BAKED || (location.protocol.startsWith('http') ? location.origin : 'http://localhost:8080');
-}
-export const defaultServer = () => BAKED || (location.protocol.startsWith('http') ? location.origin : 'http://localhost:8080');
-export function setServerAddress(s) {
-  s = String(s || '').trim();
-  if (!s || s === defaultServer()) localStorage.removeItem('f1gp.mpServer'); else localStorage.setItem('f1gp.mpServer', s);
+  return q || BAKED || OFFICIAL_SERVER;
 }
 export function wsUrl(server) {
   let u = String(server).trim().replace(/\/+$/, '').replace(/\/mp$/, '');

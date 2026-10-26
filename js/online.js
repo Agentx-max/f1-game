@@ -1,7 +1,7 @@
 // Online screen: connect, browse public lobbies, create / join by code, lobby room (players, settings, chat).
 import { TRACKS } from './tracks.js';
 import { TEAMS } from './teams.js';
-import { Net, serverAddress, setServerAddress, defaultServer } from './net.js';
+import { Net, serverAddress } from './net.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -38,15 +38,13 @@ export function setupOnline({ settings, save, onStartRace, onShowMenu, onLobbyUp
 
   // ------------------------------------------------------------------ connect page
   $('on-name').value = settings.mpName || '';
-  $('on-server').value = serverAddress();
   $('on-name').addEventListener('change', () => { settings.mpName = $('on-name').value.trim().slice(0, 16); save(); if (net.online) net.send('name', { name: settings.mpName }); });
 
   async function connect() {
     const name = $('on-name').value.trim().slice(0, 16) || settings.mpName || '';
     if (!name) { $('on-name').focus(); $('on-connect-msg').textContent = 'Pick a driver name first.'; return false; }
     settings.mpName = name; save();
-    const server = $('on-server').value.trim() || defaultServer();
-    setServerAddress(server);
+    const server = serverAddress();
     const btn = $('on-go');
     btn.disabled = true;
     $('on-connect-msg').textContent = 'Connecting…';
@@ -183,7 +181,7 @@ export function setupOnline({ settings, save, onStartRace, onShowMenu, onLobbyUp
     const u = new URL(location.href.split('#')[0].split('?')[0]);
     u.searchParams.set('join', ui.lobby.code);
     const srv = serverAddress();
-    if (srv !== location.origin) u.searchParams.set('server', srv);
+    if (new URLSearchParams(location.search).get('server')) u.searchParams.set('server', srv);
     return u.toString();
   };
   const copy = async (text, ok) => { try { await navigator.clipboard.writeText(text); toast(ok); } catch { prompt('Copy this:', text); } };
@@ -235,7 +233,6 @@ export function setupOnline({ settings, save, onStartRace, onShowMenu, onLobbyUp
   const q = new URLSearchParams(location.search);
   const jc = (q.get('join') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
   if (jc.length === 5) { ui.pendingCode = jc; $('on-code').value = jc; }
-  if (q.get('server')) $('on-server').value = q.get('server');
 
   const leave = () => { if (ui.lobby) net.send('leave'); ui.lobby = null; };
   return { net, open, backToRoom, leave, get lobby() { return ui.lobby; }, isHost, toast, hasInvite: () => !!ui.pendingCode };
