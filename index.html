@@ -83,6 +83,7 @@
           <div class="sec-title"><span>QUICK PRESETS</span><i>New to racing games? Pick Rookie.</i></div>
           <div id="presets" class="presets"></div>
           <div id="settings-list"></div>
+          <div id="keybinds"></div>
         </section>
 
         <section class="tabpage hidden" id="tab-controls">
@@ -100,28 +101,11 @@
             <div><span><b class="tk">CAM</b></span>Change camera</div>
             <div><span><b class="tk">BOX</b></span>Pit stop at the end of this lap</div>
             <div><span><b class="tk">HELP</b></span>Call marshals when you are stuck</div>
-            <div><span><b class="tk">RESET</b></span>Put the car back on the track</div>
             <div><span><b class="tk">❚❚</b></span>Pause, settings &amp; restart</div>
           </div>
           <div class="sec-title"><span>CONTROLS</span><i>Keyboard · Gamepad · Touch</i></div>
-          <div class="keymap">
-            <div><span><kbd>W</kbd><kbd>↑</kbd></span>Throttle</div>
-            <div><span><kbd>S</kbd><kbd>↓</kbd></span>Brake / reverse</div>
-            <div><span><kbd>A</kbd><kbd>D</kbd></span>Steer</div>
-            <div><span><kbd>E</kbd><kbd>Q</kbd></span>Shift up / down</div>
-            <div><span><kbd>F</kbd><kbd>Space</kbd></span>DRS rear wing</div>
-            <div><span><kbd>Shift</kbd></span>ERS overtake boost</div>
-            <div><span><kbd>Y</kbd></span>Box box! (pit stop)</div>
-            <div><span><kbd>G</kbd></span>Call marshals when stuck</div>
-            <div><span><kbd>C</kbd></span>Change camera</div>
-            <div><span><kbd>B</kbd></span>Look behind</div>
-            <div><span><kbd>R</kbd></span>Reset car to track</div>
-            <div><span><kbd>L</kbd></span>Racing line on / off</div>
-            <div><span><kbd>T</kbd></span>Standings show / hide</div>
-            <div><span><kbd>Esc</kbd></span>Pause</div>
-            <div><span><kbd>M</kbd> <kbd>H</kbd></span>Mute · hide HUD</div>
-          </div>
-          <div class="pad-note">🎮 Gamepad: RT throttle · LT brake · left stick steer · A/X shift · B DRS · RB ERS · Y camera · Start pause<br>📱 Touch: on-screen pedals, steering buttons or tilt steering (see Settings)</div>
+          <div id="keymap" class="keymap"></div>
+          <div class="pad-note"><span id="pad-map">🎮 Gamepad: RT throttle · LT brake · left stick steer</span><br>📱 Touch: on-screen pedals, steering buttons or tilt steering (see Settings)<span class="kb-tip"><br>⌨ Change any key or gamepad button in SETTINGS → CONTROLS</span></div>
         </section>
       </div>
 
@@ -202,7 +186,7 @@
             <select id="lb-team" class="on-input on-sel"></select>
             <select id="lb-driver" class="on-input on-sel"></select>
             <select id="lb-tyre" class="on-input on-sel">
-              <option value="supersoft">SUPERSOFT</option><option value="soft">SOFT</option><option value="medium">MEDIUM</option><option value="hard">HARD</option>
+              <option value="supersoft">SUPERSOFT</option><option value="soft">SOFT</option><option value="medium">MEDIUM</option><option value="hard">HARD</option><option value="inter">INTER</option><option value="wet">WET</option>
             </select>
           </div>
         </div>
@@ -272,11 +256,12 @@
       <div class="st-body">
         <div class="st-title">CAR IS STRUGGLING TO MOVE</div>
         <div class="st-desc">You're beached off the track. Track marshals can push you back onto the circuit.</div>
-        <button id="help-btn" class="help-btn"><span class="hb-ico">🔧</span>GET HELP FROM CREW <kbd>G</kbd></button>
+        <button id="help-btn" class="help-btn"><span class="hb-ico">🔧</span>GET HELP FROM CREW <kbd id="help-key">G</kbd></button>
       </div>
     </div>
   </div>
   <div id="fade" class="fade"></div>
+  <div id="visor" class="visor" aria-hidden="true"></div>
 
   <!-- TEAM RADIO (broadcast-style graphic) -->
   <div id="radio" class="radio hidden" aria-live="polite">
@@ -295,7 +280,6 @@
   <div id="touch" class="touch hidden">
     <div class="t-top">
       <button data-t="cam" class="tbtn ic" aria-label="Camera">CAM</button>
-      <button data-t="reset" class="tbtn ic" aria-label="Reset">RESET</button>
       <button data-t="box" class="tbtn ic" aria-label="Pit stop">BOX</button>
       <button data-t="help" class="tbtn ic" aria-label="Help">HELP</button>
       <button data-t="list" class="tbtn ic listb on-state" aria-label="Show or hide standings" aria-pressed="true">LIST</button>
@@ -332,7 +316,6 @@
         <div><b class="tk">ERS</b>hold for boost</div>
         <div><b class="tk">BOX</b>pit stop this lap</div>
         <div><b class="tk">HELP</b>marshals when stuck</div>
-        <div><b class="tk">RESET</b>back onto the track</div>
         <div><b class="tk">❚❚</b>pause &amp; settings</div>
         <div class="tg-man"><b class="tk">▼</b><b class="tk">▲</b>shift gears</div>
         <div class="tg-wide">Hidden standings? Tap <b class="tk">LIST</b> again or the lap counter.</div>

@@ -64,11 +64,14 @@ export class CarPhysics {
     return Math.sin(C * Math.atan(B * alpha));
   }
 
-  // controls: {throttle, brake, steerAngle, ers, tc, abs, autoGear, shiftUp, shiftDown}
+  // controls: {throttle, brake, steerAngle, ers, tc, abs, autoGear, shiftUp, shiftDown, easy}
+  // easy = stability assist (EASY handling): forward brake bias, anti-lock on both axles, less weight
+  // transfer under braking and a yaw controller that keeps the car pointing where it is steered.
   step(dt, ctl) {
     const S = this.spec, m = S.mass;
     const u = this.u, w = this.w, r = this.r;
     const absU = Math.abs(u);
+    const easy = !!ctl.easy;
     this.steer = ctl.steerAngle;
     this.throttle = ctl.throttle; this.brake = ctl.brake;
 
@@ -78,7 +81,7 @@ export class CarPhysics {
     const drag = q * S.CdA * this.dragMul * (this.drs ? 0.8 : 1);
 
     // loads (with longitudinal load transfer)
-    const dF = m * this.axF * S.cgH / this.L;
+    const dF = m * this.axF * S.cgH / this.L * (easy ? 0.5 : 1);
     let fzF = m * G * S.b / this.L + down * S.aeroBal - dF;
     let fzR = m * G * S.a / this.L + down * (1 - S.aeroBal) + dF;
     fzF = Math.max(fzF, 400); fzR = Math.max(fzR, 400);
@@ -133,7 +136,8 @@ export class CarPhysics {
     if (!reverse) {
       const bf = ctl.brake * S.maxBrake;
       const sgn = absU > 0.3 ? Math.sign(u) : 0;
-      brakeF = bf * S.brakeBias * sgn; brakeR = bf * (1 - S.brakeBias) * sgn;
+      const bias = easy ? Math.max(S.brakeBias, 0.66) : S.brakeBias;
+      brakeF = bf * bias * sgn; brakeR = bf * (1 - bias) * sgn;
       if (absU <= 0.3 && ctl.brake > 0.1) { this.u *= 0.8; }
     }
     // engine braking + harvest
@@ -147,6 +151,10 @@ export class CarPhysics {
 
     // rear combined slip
     let fxR = drive - brakeR - engBrake * Math.sign(u);
+    if (easy && fxR * Math.sign(u) < 0) { // rear anti-lock: braking never steals the rear's cornering grip
+      const allowB = Math.sqrt(Math.max(capR * capR * 0.3, capR * capR - fyR * fyR)) * 0.9;
+      if (Math.abs(fxR) > allowB) fxR = Math.sign(fxR) * allowB;
+    }
     this.spin = 0;
     if (ctl.tc) {
       const allow = Math.sqrt(Math.max(capR * capR * 0.2, capR * capR - fyR * fyR)) * 0.98;
@@ -193,6 +201,16 @@ export class CarPhysics {
     this.u += du * dt;
     this.w += dw * dt;
     this.r += dr * dt;
+    // EASY: yaw rate follows the steering (limited to what the tyres can actually hold) and sideways
+    // sliding is damped, much more strongly while braking
+    if (easy && absU > 3) {
+      const aMax = (capF + capR) / m * 1.02;
+      const rk = Math.max(-aMax / absU, Math.min(aMax / absU, u * Math.tan(d) / this.L));
+      const brk = ctl.brake > 0.1;
+      const k = 1 - Math.exp(-dt * (brk ? 7 : 3.2));
+      this.r += (rk - this.r) * k * Math.min(1, (absU - 3) / 8);
+      this.w *= Math.exp(-dt * (brk ? 5 : 1.8));
+    }
     // low speed stabilisation
     if (absU < 2) {
       const k = Math.exp(-dt * 6 * (2 - absU));

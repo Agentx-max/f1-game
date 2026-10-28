@@ -1,19 +1,31 @@
-// Keyboard + gamepad input with smoothing for digital steering.
+// Keyboard + gamepad input with smoothing for digital steering. Keys and buttons come from js/keybinds.js.
+import { loadBindings, defaultBindings, registerInput } from './keybinds.js';
+
+// edge-triggered actions (output field = binding id) and their on-screen touch button
+const EDGE = { shiftUp: 'up', shiftDown: 'down', drs: 'drs', camera: 'cam', standings: 'list', pause: 'pause', help: 'help', box: 'box', mute: null, hud: null, line: null };
+const NAV = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
+// text fields keep their keys (range sliders, buttons etc. do not)
+const isField = t => !!t && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || (t.tagName === 'INPUT' && !['range', 'checkbox', 'radio', 'button', 'submit'].includes(t.type)));
+
 export class Input {
   constructor() {
     this.keys = new Set();
     this.pressed = new Set();
     this.steer = 0; this.throttle = 0; this.brake = 0;
     this.usingPad = false;
+    this._capturing = false;
+    this.padPrev = [];
+    this.setBindings(loadBindings());
+    registerInput(this);
     addEventListener('keydown', e => {
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+      if (this.capturing || (isField(e.target) && e.code !== 'Escape')) return;
+      if (NAV.has(e.code) || (this.bound.has(e.code) && !e.ctrlKey && !e.metaKey)) e.preventDefault();
       if (!this.keys.has(e.code)) this.pressed.add(e.code);
       this.keys.add(e.code);
       this.usingPad = false;
     });
     addEventListener('keyup', e => this.keys.delete(e.code));
     addEventListener('blur', () => this.keys.clear());
-    this.padPrev = {};
     // touch
     this.touch = { left: false, right: false, thr: false, brk: false, ers: false, look: false };
     this.touchMode = 'buttons';
@@ -28,9 +40,24 @@ export class Input {
     });
   }
 
+  setBindings(b) {
+    this.bindings = Object.assign(defaultBindings(), b);
+    this.bound = new Set(Object.values(this.bindings).flatMap(a => a.keys).filter(Boolean));
+  }
+
+  // set by the rebinding UI while it waits for a key / button: no action fires, and a button
+  // still held when it ends does not count as a fresh press
+  get capturing() { return this._capturing; }
+  set capturing(v) {
+    this._capturing = !!v;
+    const p = this.pad();
+    this.padPrev = p ? Array.from(p.buttons, b => !!(b && b.pressed)) : [];
+    this.pressed.clear();
+  }
+
   // Bind on-screen buttons: elements with data-t="left|right|thr|brk|ers|look|drs|cam|pause"
   bindTouch(root) {
-    const edgeKeys = ['drs', 'cam', 'pause', 'reset', 'help', 'box', 'up', 'down', 'list'];
+    const edgeKeys = ['drs', 'cam', 'pause', 'help', 'box', 'up', 'down', 'list'];
     root.querySelectorAll('[data-t]').forEach(el => {
       const k = el.dataset.t;
       const down = e => {
@@ -49,8 +76,9 @@ export class Input {
     });
   }
 
-  key(...codes) { return codes.some(c => this.keys.has(c)); }
-  hit(code) { return this.pressed.has(code); }
+  // action held / just pressed on the keyboard
+  key(id) { return this.bindings[id].keys.some(c => c && this.keys.has(c)); }
+  hit(id) { return this.bindings[id].keys.some(c => c && this.pressed.has(c)); }
 
   pad() {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -60,13 +88,17 @@ export class Input {
 
   update(dt) {
     const p = this.pad();
-    const out = { steer: 0, throttle: 0, brake: 0, shiftUp: false, shiftDown: false, drs: false, ers: false, camera: false, lookBack: false, reset: false, pause: false };
+    const out = { steer: 0, throttle: 0, brake: 0, shiftUp: false, shiftDown: false, drs: false, ers: false, camera: false, lookBack: false, pause: false, standings: false, help: false, box: false, mute: false, hud: false, line: false };
+    const down = p ? Array.from(p.buttons, b => !!(b && b.pressed)) : [], was = this.padPrev;
+    this.padPrev = down;
+    if (this.capturing) { this.pressed.clear(); this.steer = this.throttle = this.brake = 0; return out; }
+    const B = this.bindings;
+    const padHeld = id => B[id].pad != null && !!down[B[id].pad];
+    const padHit = id => padHeld(id) && !was[B[id].pad];
     let padActive = false;
     if (p) {
       const ax = p.axes[0] || 0;
       const rt = p.buttons[7] ? p.buttons[7].value : 0, lt = p.buttons[6] ? p.buttons[6].value : 0;
-      const btn = i => !!(p.buttons[i] && p.buttons[i].pressed);
-      const edge = i => { const now = btn(i); const was = this.padPrev[i]; this.padPrev[i] = now; return now && !was; };
       if (Math.abs(ax) > 0.08 || rt > 0.05 || lt > 0.05) { padActive = true; this.usingPad = true; }
       if (this.usingPad) {
         const dz = 0.06;
@@ -74,19 +106,12 @@ export class Input {
         out.steer = -Math.sign(a) * Math.pow(Math.abs(a), 1.6);
         out.throttle = rt; out.brake = lt;
       }
-      if (edge(0)) out.shiftUp = true;
-      if (edge(2)) out.shiftDown = true;
-      if (edge(3)) out.camera = true;
-      if (edge(1)) out.drs = true;
-      if (btn(5)) out.ers = true;
-      if (btn(4)) out.lookBack = true;
-      if (edge(9)) out.pause = true;
-      if (edge(8)) out.reset = true;
     }
     if (!padActive && !this.usingPad) {
       const T = this.touch;
-      const left = this.key('ArrowLeft', 'KeyA') || T.left, right = this.key('ArrowRight', 'KeyD') || T.right;
-      if (this.usingTouch && this.touchMode === 'tilt' && !this.key('ArrowLeft', 'KeyA', 'ArrowRight', 'KeyD')) {
+      const kl = this.key('left'), kr = this.key('right');
+      const left = kl || T.left, right = kr || T.right;
+      if (this.usingTouch && this.touchMode === 'tilt' && !kl && !kr) {
         const target = Math.sign(this.tilt) * Math.pow(Math.abs(this.tilt), 1.3);
         this.steer += (target - this.steer) * Math.min(1, dt * 14);
       } else {
@@ -96,29 +121,17 @@ export class Input {
         this.steer += Math.sign(d) * Math.min(Math.abs(d), rate * dt);
       }
       out.steer = this.steer;
-      const up = this.key('ArrowUp', 'KeyW') || T.thr, down = this.key('ArrowDown', 'KeyS') || T.brk;
+      const up = this.key('throttle') || T.thr, dn = this.key('brake') || T.brk;
       this.throttle += ((up ? 1 : 0) - this.throttle) * Math.min(1, dt * (up ? 9 : 14));
-      this.brake += ((down ? 1 : 0) - this.brake) * Math.min(1, dt * (down ? 14 : 18));
+      this.brake += ((dn ? 1 : 0) - this.brake) * Math.min(1, dt * (dn ? 14 : 18));
       out.throttle = this.throttle; out.brake = this.brake;
     } else {
       this.steer = out.steer;
     }
-    if (this.hit('KeyE') || this.hit('T_up')) out.shiftUp = true;
-    if (this.hit('KeyQ') || this.hit('T_down')) out.shiftDown = true;
-    if (this.hit('KeyT') || this.hit('T_list')) out.standings = true;
-    if (this.hit('KeyC')) out.camera = true;
-    if (this.hit('KeyF') || this.hit('Space')) out.drs = true;
-    if (this.key('ShiftLeft', 'ShiftRight') || this.touch.ers) out.ers = true;
-    if (this.key('KeyB') || this.touch.look) out.lookBack = true;
-    if (this.hit('KeyR') || this.hit('T_reset')) out.reset = true;
-    if (this.hit('Escape') || this.hit('KeyP') || this.hit('T_pause')) out.pause = true;
-    if (this.hit('T_drs')) out.drs = true;
-    if (this.hit('T_cam')) out.camera = true;
-    if (this.hit('KeyG') || this.hit('T_help')) out.help = true;
-    if (this.hit('KeyY') || this.hit('T_box')) out.box = true;
-    if (this.hit('KeyM')) out.mute = true;
-    if (this.hit('KeyH')) out.hud = true;
-    if (this.hit('KeyL')) out.line = true;
+    for (const id in EDGE) if (this.hit(id) || padHit(id) || (EDGE[id] && this.pressed.has('T_' + EDGE[id]))) out[id] = true;
+    if (this.key('ers') || padHeld('ers') || this.touch.ers) out.ers = true;
+    if (this.key('lookBack') || padHeld('lookBack') || this.touch.look) out.lookBack = true;
+    if (this.pressed.has('Escape')) out.pause = true; // Esc always pauses, even when unbound
     this.pressed.clear();
     return out;
   }

@@ -2,9 +2,27 @@
 import { TRACK_DATA } from './trackdata.js';
 import { TRACKS } from './tracks.js';
 import { TEAMS } from './teams.js';
+import { ACTIONS, loadBindings, saveBindings, defaultBindings, keyLabel, padLabel, getInput } from './keybinds.js';
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// ---------------------------------------------------------------- key binding helpers
+const bindViews = new Set(); // refreshers for everything that shows key names
+let listening = null; // the binding slot waiting for a key / button (one at a time)
+const bindingsOf = (input = getInput()) => input?.bindings || loadBindings();
+// labels for an action's keys; both Shift (Ctrl, Alt, Meta) keys together read as a single 'SHIFT'
+function keyLabels(codes) {
+  const out = [];
+  for (const c of codes) {
+    if (!c) continue;
+    const m = /^(Shift|Control|Alt|Meta)(Left|Right)$/.exec(c);
+    const l = m && codes.includes(m[1] + (m[2] === 'Left' ? 'Right' : 'Left')) ? keyLabel(c).slice(2) : keyLabel(c);
+    if (!out.includes(l)) out.push(l);
+  }
+  return out;
+}
+const keyOf = id => { const b = bindingsOf()[id]; return keyLabels(b.keys)[0] || (b.pad != null ? padLabel(b.pad) : '—'); };
 
 // ---------------------------------------------------------------- icons
 const I = (d, extra = '') => `<svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ${extra}>${d}</svg>`;
@@ -73,7 +91,7 @@ function tyreSVG(col) {
 const bar = (label, v, col = '#e10600') => `<div class="stat"><span>${label}</span><div class="sbar"><i style="width:${Math.round(v * 100)}%;background:${col}"></i></div><b>${Math.round(v * 100)}</b></div>`;
 
 // ---------------------------------------------------------------- settings definitions
-const TYRES = [['supersoft', '#a0168c', 'SUPERSOFT', 'Most grip'], ['soft', '#e8202a', 'SOFT', 'High grip'], ['medium', '#ffd200', 'MEDIUM', 'Balanced'], ['hard', '#f0f0f0', 'HARD', 'Least grip']];
+const TYRES = [['supersoft', '#a0168c', 'SUPERSOFT', 'Most grip'], ['soft', '#e8202a', 'SOFT', 'High grip'], ['medium', '#ffd200', 'MEDIUM', 'Balanced'], ['hard', '#f0f0f0', 'HARD', 'Least grip'], ['inter', '#3fb02a', 'INTER', 'Damp track'], ['wet', '#1f6fd6', 'WET', 'Heavy rain']];
 const GROUPS = [
   {
     title: 'RACE', hint: 'Shape the event to your liking',
@@ -97,7 +115,7 @@ const GROUPS = [
     items: [
       { key: 'tc', type: 'toggle', icon: 'tc', label: 'Traction control', desc: 'Stops the rear tyres spinning when you accelerate out of corners. Keep it ON if you are new.' },
       { key: 'abs', type: 'toggle', icon: 'abs', label: 'Anti-lock brakes (ABS)', desc: 'Stops the wheels locking under heavy braking, so you can still steer while slowing down.' },
-      { key: 'gear', type: 'toggle', icon: 'gear', label: 'Automatic gearbox', desc: 'Changes gear for you. Switch OFF to use the paddles yourself (E = up, Q = down).' },
+      { key: 'gear', type: 'toggle', icon: 'gear', label: 'Automatic gearbox', desc: () => `Changes gear for you. Switch OFF to use the paddles yourself (${keyOf('shiftUp')} = up, ${keyOf('shiftDown')} = down).` },
       { key: 'steer', type: 'toggle', icon: 'wheel', label: 'Steering assist', desc: 'Calms the steering at high speed and helps catch slides. Very helpful on keyboard and touch screens.' },
       { key: 'line', type: 'toggle', icon: 'line', label: 'Racing line', desc: 'Shows the fastest path on the track. Green = full throttle, yellow = ease off, red = brake now!' },
     ],
@@ -109,9 +127,9 @@ const GROUPS = [
         key: 'quality', type: 'chips', icon: 'quality', label: 'Graphics quality', desc: 'Higher looks better but needs a stronger device. The game also lowers resolution automatically if it starts to stutter.', options: [['low', 'LOW'], ['medium', 'MEDIUM'], ['high', 'ULTRA']],
         sub: { low: 'Fastest. Recommended for phones and laptops without a gaming GPU.', medium: 'Shadows, reflections and a full field of trees. Best for most PCs.', high: 'Sharpest shadows, more trees, high-resolution textures.' },
       },
-      { key: 'cam', type: 'chips', icon: 'camera', label: 'Starting camera', desc: 'You can always switch during the race with C (or the CAM button).', options: [[0, 'CHASE'], [1, 'FAR'], [2, 'T-CAM'], [3, 'COCKPIT'], [4, 'NOSE'], [5, 'TV']] },
+      { key: 'cam', type: 'chips', icon: 'camera', label: 'Starting camera', desc: () => `You can always switch during the race with ${keyOf('camera')} (or the CAM button).`, options: [[0, 'CHASE'], [1, 'FAR'], [2, 'T-CAM'], [3, 'COCKPIT'], [4, 'NOSE'], [5, 'TV']] },
       { key: 'radio', type: 'toggle', icon: 'radio', label: 'Team radio', desc: 'Your race engineer talks to you: DRS, tyres, fuel, pit stops and weather, with the on-screen TEAM RADIO graphic.' },
-      { key: 'standings', type: 'toggle', icon: 'list', label: 'Driver standings', desc: 'Shows the live timing tower with every driver. Hide it any time during a race with T, the LIST button or by tapping the tower.' },
+      { key: 'standings', type: 'toggle', icon: 'list', label: 'Driver standings', desc: () => `Shows the live timing tower with every driver. Hide it any time during a race with ${keyOf('standings')}, the LIST button or by tapping the tower.` },
       { key: 'blur', type: 'toggle', icon: 'blur', label: 'Speed blur', desc: 'Blurs the screen edges at high speed for a sense of velocity. Turn OFF for extra smoothness.' },
       { key: 'vol', type: 'slider', icon: 'volume', label: 'Master volume', desc: 'Engine, tyres, wind and impact sounds.' },
     ],
@@ -132,14 +150,41 @@ const PRESETS = [
   { id: 'legend', name: 'LEGEND', icon: '♛', desc: 'Pure simulation: manual gears, no helpers, AI at the limit.', v: { tc: false, abs: false, gear: false, steer: false, line: false, diff: 0.985 } },
 ];
 
-const TIPS = [
+const TIPS = k => [
   ['Brake in a straight line', 'Do most of your braking before you turn. The racing line turns red where you should brake.'],
   ['Hit the apex', 'Aim for the inside kerb in the middle of the corner, then let the car drift wide on the exit.'],
   ['Be smooth on the throttle', 'Squeeze the throttle as you straighten the wheel. Too much, too early = spin.'],
-  ['Use DRS on the straights', 'When DRS turns green, press F / DRS to open the rear wing for extra top speed.'],
-  ['Save ERS for overtakes', 'Hold Shift / ERS for a 120 kW electric boost. It recharges when you brake.'],
+  ['Use DRS on the straights', `When DRS turns green, press ${k('drs')} / DRS to open the rear wing for extra top speed.`],
+  ['Save ERS for overtakes', `Hold ${k('ers')} / ERS for a 120 kW electric boost. It recharges when you brake.`],
   ['Stay on the track', 'Grass and gravel kill your speed. All four wheels off the track invalidates a Time Trial lap.'],
 ];
+
+// HOW TO DRIVE keyboard list: [actions, description]
+const KEYMAP = [
+  [['throttle'], 'Throttle'], [['brake'], 'Brake / reverse'], [['left', 'right'], 'Steer left / right'], [['shiftUp', 'shiftDown'], 'Shift up / down'],
+  [['drs'], 'DRS rear wing'], [['ers'], 'ERS overtake boost'], [['box'], 'Box box! (pit stop)'], [['help'], 'Call marshals when stuck'],
+  [['camera'], 'Change camera'], [['lookBack'], 'Look behind'], [['line'], 'Racing line on / off'], [['standings'], 'Standings show / hide'],
+  [['pause'], 'Pause'], [['mute', 'hud'], 'Mute · hide HUD'],
+];
+const lcFirst = s => /^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s;
+
+// key list, gamepad note and the stuck-car help key, generated from the current bindings
+function renderControlsHelp() {
+  const B = bindingsOf();
+  const km = $('keymap'), pm = $('pad-map'), hk = $('help-key');
+  if (km) km.innerHTML = KEYMAP.map(([ids, text]) => {
+    const per = ids.map(id => {
+      const l = keyLabels(B[id].keys);
+      if (id === 'pause' && !B.pause.keys.includes('Escape')) l.push('ESC');
+      return l.length ? l : ['—'];
+    });
+    const all = [];
+    for (let i = 0; i < Math.max(...per.map(l => l.length)); i++) per.forEach(l => l[i] && all.push(l[i]));
+    return `<div><span>${all.map(l => `<kbd>${esc(l)}</kbd>`).join('')}</span>${text}</div>`;
+  }).join('');
+  if (pm) pm.textContent = '🎮 Gamepad: ' + ['RT throttle', 'LT brake', 'left stick steer', ...ACTIONS.filter(a => !a.padFixed && B[a.id].pad != null).map(a => `${padLabel(B[a.id].pad)} ${lcFirst(a.label)}`)].join(' · ');
+  if (hk) { const k = keyOf('help'); hk.textContent = k; hk.classList.toggle('hidden', k === '—'); }
+}
 
 // ---------------------------------------------------------------- build
 export function buildMenu(ctx) {
@@ -250,8 +295,12 @@ export function buildMenu(ctx) {
 
   const syncAll = buildRows($('settings-list'), GROUPS, settings, changed, ctx.onTeam);
 
-  // controls & tips page
-  $('tips').innerHTML = TIPS.map(([t, d], i) => `<div class="tip"><div class="tip-n">${String(i + 1).padStart(2, '0')}</div><div><b>${t}</b><span>${d}</span></div></div>`).join('');
+  // controls & tips page, key rebinding (key names everywhere follow the player's bindings)
+  const renderTips = () => { $('tips').innerHTML = TIPS(id => esc(keyOf(id))).map(([t, d], i) => `<div class="tip"><div class="tip-n">${String(i + 1).padStart(2, '0')}</div><div><b>${t}</b><span>${d}</span></div></div>`).join(''); };
+  renderTips();
+  renderControlsHelp();
+  if ($('keybinds')) buildKeybinds($('keybinds'), { input: getInput() });
+  bindViews.add(() => { syncAll(); renderTips(); renderControlsHelp(); });
 
   function refreshTrackInfo() {
     const t = TRACKS.find(x => x.id === settings.track);
@@ -288,8 +337,9 @@ for (const g of groups) {
   for (const it of g.items) {
     const row = document.createElement('div');
     row.className = 'set-item ' + it.type;
-    row.title = it.desc;
-    row.innerHTML = `<div class="si-ico">${ICONS[it.icon] || ''}</div><div class="si-text"><div class="si-label">${it.label}</div><div class="si-desc">${it.desc}</div><div class="si-sub"></div></div><div class="si-ctl"></div>`;
+    const desc = () => typeof it.desc === 'function' ? it.desc() : it.desc;
+    row.title = desc();
+    row.innerHTML = `<div class="si-ico">${ICONS[it.icon] || ''}</div><div class="si-text"><div class="si-label">${it.label}</div><div class="si-desc">${desc()}</div><div class="si-sub"></div></div><div class="si-ctl"></div>`;
     const ctl = row.querySelector('.si-ctl'), sub = row.querySelector('.si-sub');
     let sync;
     if (it.type === 'toggle') {
@@ -317,7 +367,7 @@ for (const g of groups) {
       sync = () => { r.value = settings[it.key]; lbl.textContent = Math.round(settings[it.key] * 100) + '%'; r.style.setProperty('--p', settings[it.key] * 100 + '%'); };
       r.addEventListener('input', () => { settings[it.key] = Number(r.value); sync(); onChange(it.key); });
     }
-    syncers.push(sync);
+    syncers.push(typeof it.desc === 'function' ? () => { sync(); row.title = row.querySelector('.si-desc').textContent = desc(); } : sync);
     sync();
     sec.appendChild(row);
   }
@@ -334,5 +384,131 @@ export function buildPauseSettings(container, ctx, mobile) {
     { title: 'GRAPHICS & SOUND', items: pick(['quality', 'cam', 'radio', 'standings', 'blur', 'vol']) },
   ];
   if (mobile) groups.push({ title: 'TOUCH', items: pick(['touch', 'tiltInvert']) });
-  return buildRows(container, groups, ctx.settings, key => { ctx.save(); ctx.onChange && ctx.onChange(key); });
+  const sync = buildRows(container, groups, ctx.settings, key => { ctx.save(); ctx.onChange && ctx.onChange(key); });
+  const kb = document.createElement('div');
+  container.appendChild(kb);
+  const syncKeys = buildKeybinds(kb, { input: getInput() });
+  bindViews.add(sync);
+  return () => { sync(); syncKeys(); };
+}
+
+// ---------------------------------------------------------------- controls (key / gamepad rebinding)
+function commitBindings(b, input) {
+  saveBindings(b);
+  input?.setBindings(b);
+  bindViews.forEach(f => f());
+}
+function stopListening() { const l = listening; listening = null; l?.end(); }
+// pressed gamepad buttons on any pad (triggers are the analog pedals, so they are never bound)
+function padButtons() {
+  const s = new Set();
+  for (const p of navigator.getGamepads ? navigator.getGamepads() : []) if (p && p.connected) p.buttons.forEach((b, i) => { if (b.pressed && i !== 6 && i !== 7) s.add(i); });
+  return s;
+}
+
+// Two key slots and one gamepad slot per action: click a slot, then press the new key / button.
+// Returns a function that refreshes the slot labels.
+export function buildKeybinds(container, { input = getInput(), onChange } = {}) {
+  const groups = [...new Set(ACTIONS.map(a => a.group))];
+  const row = a => `<div class="kb-row" data-id="${a.id}"><span class="kb-label">${a.label}</span>`
+    + [0, 1].map(i => `<button class="kb-slot" data-slot="${i}" title="${a.label}: click, then press a key"></button>`).join('')
+    + (a.padFixed ? `<span class="kb-slot kb-fixed" title="Analog gamepad control (fixed)">${a.padFixed}</span>` : `<button class="kb-slot kb-pad" data-slot="pad" title="${a.label}: click, then press a gamepad button"></button>`)
+    + '</div>';
+  container.classList.add('set-group', 'keybinds');
+  container.innerHTML = `<div class="sec-title"><span>CONTROLS</span></div>
+    <div class="kb-top"><div class="kb-hint">Click a slot, then press a key or gamepad button. <kbd>ESC</kbd> cancels, <kbd>DEL</kbd> clears. Triggers and the left stick always drive the car.</div><button class="kb-reset">RESET TO DEFAULTS</button></div>
+    ${groups.map(g => `<div class="kb-sub"><span>${g}</span><em>KEY</em><em>ALT KEY</em><em>GAMEPAD</em></div>${ACTIONS.filter(a => a.group === g).map(row).join('')}`).join('')}
+    <div class="kb-msg"></div>`;
+  const msg = container.querySelector('.kb-msg');
+  let msgT = 0;
+  const say = t => { msg.textContent = t; msg.classList.add('show'); clearTimeout(msgT); msgT = setTimeout(() => msg.classList.remove('show'), 3500); };
+
+  function sync() {
+    const B = bindingsOf(input);
+    container.querySelectorAll('.kb-row').forEach(r => r.querySelectorAll('button.kb-slot:not(.listening)').forEach(s => {
+      const pad = s.dataset.slot === 'pad', v = pad ? B[r.dataset.id].pad : B[r.dataset.id].keys[s.dataset.slot];
+      s.textContent = pad ? padLabel(v) : keyLabel(v);
+      s.classList.toggle('empty', v == null);
+    }));
+  }
+
+  // set (or clear, v = null) a slot; the key / button is taken away from any other action using it
+  function assign(id, slot, v) {
+    const B = JSON.parse(JSON.stringify(bindingsOf(input)));
+    const pad = slot === 'pad', taken = [];
+    if (v != null) for (const a of ACTIONS) {
+      const b = B[a.id];
+      if (pad && b.pad === v && a.id !== id) { b.pad = null; taken.push(a); }
+      if (!pad) b.keys.forEach((k, i) => {
+        if (k !== v || (a.id === id && i === +slot)) return;
+        b.keys[i] = null;
+        if (a.id !== id && !taken.includes(a)) taken.push(a);
+      });
+    }
+    if (pad) B[id].pad = v; else B[id].keys[+slot] = v;
+    commitBindings(B, input);
+    onChange?.(bindingsOf(input));
+    if (!taken.length) return;
+    for (const a of taken) {
+      const r = container.querySelector(`.kb-row[data-id="${a.id}"]`);
+      r.classList.remove('clash'); void r.offsetWidth; r.classList.add('clash');
+    }
+    const name = a => a.label.toUpperCase();
+    say(`${pad ? padLabel(v) : keyLabel(v)} moved from ${taken.map(name).join(', ')} to ${name(ACTIONS.find(a => a.id === id))}`);
+  }
+
+  function listen(btn) {
+    const again = listening?.btn === btn;
+    stopListening();
+    if (again) return;
+    const id = btn.closest('.kb-row').dataset.id, slot = btn.dataset.slot, pad = slot === 'pad';
+    let raf = 0, held = padButtons();
+    const finish = v => { stopListening(); if (v !== undefined) assign(id, slot, v); };
+    const onKey = e => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.repeat || !e.code) return;
+      if (e.code === 'Escape') finish();
+      else if (e.code === 'Backspace' || e.code === 'Delete') finish(null);
+      else if (!pad) finish(e.code);
+    };
+    const onPointer = e => { if (!btn.contains(e.target)) finish(); };
+    const poll = () => {
+      raf = requestAnimationFrame(poll);
+      const now = padButtons();
+      for (const i of now) if (!held.has(i)) return finish(i);
+      held = now;
+    };
+    const timer = setTimeout(() => finish(), 6000);
+    addEventListener('keydown', onKey, true);
+    document.addEventListener('pointerdown', onPointer, true);
+    btn.classList.add('listening');
+    btn.textContent = pad ? 'PRESS A BUTTON…' : 'PRESS A KEY…';
+    if (input) input.capturing = true;
+    listening = {
+      btn, end() {
+        removeEventListener('keydown', onKey, true);
+        document.removeEventListener('pointerdown', onPointer, true);
+        cancelAnimationFrame(raf); clearTimeout(timer);
+        btn.classList.remove('listening'); btn.blur();
+        if (input) input.capturing = false;
+        sync();
+      },
+    };
+    if (pad) poll();
+  }
+
+  container.addEventListener('click', e => {
+    const s = e.target.closest('button.kb-slot');
+    if (s) listen(s);
+    else if (e.target.closest('.kb-reset')) {
+      stopListening();
+      commitBindings(defaultBindings(), input);
+      onChange?.(bindingsOf(input));
+      say('All controls are back to their defaults');
+    }
+  });
+  container.addEventListener('animationend', e => { if (e.animationName === 'kbClash') e.target.classList.remove('clash'); });
+  bindViews.add(sync);
+  sync();
+  return sync;
 }

@@ -1,6 +1,7 @@
 // Time of day + weather: DAY (original look), NIGHT (floodlit track, moon, stars) and RAIN
 // (wet glossy asphalt with puddles, falling rain, spray behind cars, drops on the cockpit view, lightning).
 import * as THREE from 'three';
+import { buildFloodField, enableFlood, disableFlood } from './floodlight.js';
 
 export const CONDITIONS = [
   ['day', 'DAY', 'Sunny afternoon, the original look.'],
@@ -27,50 +28,66 @@ function mistTexture() {
     ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
   });
 }
-function moonTexture() {
-  const r = rng(77);
-  return canvasTex(256, 256, (ctx) => {
-    const glow = ctx.createRadialGradient(128, 128, 30, 128, 128, 128);
-    glow.addColorStop(0, 'rgba(220,230,255,0.55)'); glow.addColorStop(0.45, 'rgba(160,180,255,0.12)'); glow.addColorStop(1, 'rgba(120,140,255,0)');
-    ctx.fillStyle = glow; ctx.fillRect(0, 0, 256, 256);
-    ctx.fillStyle = '#f4f1e6'; ctx.beginPath(); ctx.arc(128, 128, 46, 0, Math.PI * 2); ctx.fill();
-    ctx.save(); ctx.beginPath(); ctx.arc(128, 128, 46, 0, Math.PI * 2); ctx.clip();
-    for (let k = 0; k < 22; k++) { ctx.fillStyle = `rgba(150,150,140,${0.12 + r() * 0.2})`; ctx.beginPath(); ctx.arc(90 + r() * 80, 90 + r() * 80, 3 + r() * 12, 0, Math.PI * 2); ctx.fill(); }
-    ctx.restore();
+// starburst glare for distant lamp banks
+function glareTexture() {
+  return canvasTex(128, 128, (ctx) => {
+    const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.08, 'rgba(255,250,240,0.9)'); g.addColorStop(0.25, 'rgba(255,240,220,0.22)'); g.addColorStop(1, 'rgba(255,230,200,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
+    ctx.globalCompositeOperation = 'lighter';
+    for (const [a, len, w] of [[0, 62, 2.2], [Math.PI / 2, 62, 2.2], [Math.PI / 4, 34, 1.2], [-Math.PI / 4, 34, 1.2]]) {
+      ctx.save(); ctx.translate(64, 64); ctx.rotate(a);
+      const sg = ctx.createLinearGradient(-len, 0, len, 0);
+      sg.addColorStop(0, 'rgba(255,245,230,0)'); sg.addColorStop(0.5, 'rgba(255,245,230,0.55)'); sg.addColorStop(1, 'rgba(255,245,230,0)');
+      ctx.fillStyle = sg; ctx.fillRect(-len, -w, len * 2, w * 2);
+      ctx.restore();
+    }
   });
 }
-function lampGlowTexture() {
-  return canvasTex(64, 64, (ctx) => {
-    const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-    g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.2, 'rgba(255,245,220,0.8)'); g.addColorStop(1, 'rgba(255,230,180,0)');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
-  });
-}
-// ------------------------------------------------------------------ night sky: gradient dome, stars, moon
+
+// ------------------------------------------------------------------ night sky: deep blue dome, light-polluted horizon, faint clouds, moon, stars
 function buildNightSky(moonDir) {
   const g = new THREE.Group();
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(7000, 32, 16), new THREE.ShaderMaterial({
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(7000, 48, 24), new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, fog: false,
-    uniforms: { moon: { value: moonDir.clone() } },
+    uniforms: { moon: { value: moonDir.clone() }, time: { value: 0 } },
     vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
-    fragmentShader: `uniform vec3 moon; varying vec3 vD;
+    fragmentShader: `uniform vec3 moon; uniform float time; varying vec3 vD;
+      float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float n2(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+        return mix(mix(h2(i), h2(i+vec2(1,0)), f.x), mix(h2(i+vec2(0,1)), h2(i+vec2(1,1)), f.x), f.y); }
+      float fbm(vec2 p){ float s = 0.0, a = 0.5; for (int k = 0; k < 4; k++){ s += a * n2(p); p *= 2.07; a *= 0.5; } return s; }
       void main(){
-        float h = clamp(vD.y, -0.1, 1.0);
-        vec3 zen = vec3(0.025, 0.04, 0.11), hor = vec3(0.12, 0.15, 0.26), glow = vec3(0.30, 0.22, 0.20);
-        vec3 c = mix(hor, zen, pow(max(h, 0.0), 0.55));
-        c += glow * pow(1.0 - abs(h), 10.0) * 0.6; // city glow on the horizon
-        float m = max(dot(vD, moon), 0.0);
-        c += vec3(0.35, 0.4, 0.55) * pow(m, 40.0) * 0.5;
-        gl_FragColor = vec4(c, 1.0);
+        float y = vD.y, h = clamp(y, 0.0, 1.0);
+        vec3 zen = vec3(0.0016, 0.0032, 0.0105), mid = vec3(0.006, 0.011, 0.03), hor = vec3(0.034, 0.036, 0.05);
+        vec3 c = mix(mid, zen, smoothstep(0.08, 0.85, h));
+        c = mix(hor, c, smoothstep(0.0, 0.22, h));
+        // sodium/LED glow of the floodlit circuit and the town around it, scattered in the haze
+        c += vec3(0.11, 0.075, 0.045) * pow(1.0 - h, 9.0) * 0.9 + vec3(0.03, 0.03, 0.04) * pow(1.0 - h, 3.0) * 0.35;
+        // thin clouds lit from below
+        vec2 uv = vD.xz / (h + 0.12) * 0.9 + vec2(time * 0.004, time * 0.0015);
+        float cl = smoothstep(0.52, 0.85, fbm(uv * 1.7)) * smoothstep(0.02, 0.25, h);
+        c = mix(c, vec3(0.05, 0.045, 0.045) * (1.25 - h), cl * 0.55);
+        // moon: crisp disc with maria + soft halo
+        float m = dot(vD, moon);
+        float disc = smoothstep(0.99992, 0.99996, m);
+        vec3 tang = normalize(cross(moon, vec3(0.0, 1.0, 0.0)));
+        vec2 mp = vec2(dot(vD, tang), dot(vD, cross(tang, moon))) * 160.0;
+        float maria = 0.75 + 0.25 * fbm(mp * 1.3 + 3.0);
+        c += vec3(1.6, 1.55, 1.42) * disc * maria * (1.0 - cl * 0.7);
+        c += vec3(0.16, 0.18, 0.24) * pow(max(m, 0.0), 900.0) * 0.6 + vec3(0.04, 0.05, 0.07) * pow(max(m, 0.0), 60.0) * 0.5;
+        if (y < 0.0) c = hor * (1.0 + y * 2.0);
+        gl_FragColor = vec4(max(c, vec3(0.0)), 1.0);
       }`,
   }));
+  dome.renderOrder = -2;
   g.add(dome);
-  const r = rng(321), n = 1600, pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n);
+  const r = rng(321), n = 1100, pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n);
   for (let k = 0; k < n; k++) {
-    const y = 0.08 + r() * 0.92, a = r() * Math.PI * 2, s = Math.sqrt(1 - y * y);
+    const y = 0.12 + Math.pow(r(), 0.7) * 0.88, a = r() * Math.PI * 2, s = Math.sqrt(1 - y * y);
     pos.set([Math.cos(a) * s * 6500, y * 6500, Math.sin(a) * s * 6500], k * 3);
-    const t = r(); col.set(t < 0.15 ? [1, 0.85, 0.7] : t < 0.3 ? [0.75, 0.85, 1] : [1, 1, 1], k * 3);
-    size[k] = 1 + Math.pow(r(), 6) * 3.5;
+    const t = r(); col.set(t < 0.15 ? [1, 0.86, 0.72] : t < 0.3 ? [0.78, 0.86, 1] : [1, 1, 1], k * 3);
+    size[k] = 0.7 + Math.pow(r(), 7) * 2.2;
   }
   const sg = new THREE.BufferGeometry();
   sg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -79,70 +96,121 @@ function buildNightSky(moonDir) {
   const stars = new THREE.Points(sg, new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, fog: false, uniforms: { time: { value: 0 }, pr: { value: 1 } },
     vertexShader: `attribute float size; attribute vec3 color; varying vec3 vC; varying float vT; uniform float time; uniform float pr;
-      void main(){ vC = color; vT = 0.75 + 0.25 * sin(time * 2.0 + position.x * 0.01 + position.z * 0.013);
-        gl_PointSize = size * 1.8 * pr; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      void main(){ vC = color; float el = normalize(position).y;
+        vT = (0.7 + 0.3 * sin(time * 2.3 + position.x * 0.013 + position.z * 0.011)) * smoothstep(0.1, 0.45, el);
+        gl_PointSize = size * 1.6 * pr; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: `varying vec3 vC; varying float vT;
-      void main(){ float d = length(gl_PointCoord - 0.5); float a = smoothstep(0.5, 0.0, d) * vT; gl_FragColor = vec4(vC, a); }`,
+      void main(){ float d = length(gl_PointCoord - 0.5); float a = smoothstep(0.5, 0.05, d) * vT * 0.85; gl_FragColor = vec4(vC, a); }`,
   }));
   stars.frustumCulled = false;
+  stars.renderOrder = -1;
   g.add(stars);
-  const moon = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTexture(), depthWrite: false, fog: false, transparent: true }));
-  moon.position.copy(moonDir).multiplyScalar(6000);
-  moon.scale.setScalar(900);
-  g.add(moon);
-  return { group: g, stars };
+  return { group: g, stars, dome };
 }
 
-// ------------------------------------------------------------------ floodlights along the circuit
-// Poles beside the barriers with glowing lamp heads, plus a small pool of real spotlights that
-// follow the player (hundreds of real lights would be far too slow on phones).
+// reflections at night: dark sky with rows of bright lamp banks (car paint, visors and wet kerbs pick them up)
+function nightEnvironment(renderer) {
+  const s = new THREE.Scene();
+  s.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: 'varying vec3 vD; void main(){ float h = max(vD.y, 0.0); vec3 c = mix(vec3(0.05,0.045,0.05), vec3(0.004,0.007,0.02), smoothstep(0.0,0.5,h)); if (vD.y < 0.0) c = vec3(0.02); gl_FragColor = vec4(c, 1.0); }',
+  })));
+  const lamp = new THREE.MeshBasicMaterial({ color: new THREE.Color(9, 8.6, 8) });
+  const geo = new THREE.PlaneGeometry(3.2, 1.3);
+  for (let k = 0; k < 28; k++) {
+    const a = (k / 28) * Math.PI * 2, el = 0.22 + (k % 3) * 0.12, d = 38;
+    const m = new THREE.Mesh(geo, lamp);
+    m.position.set(Math.cos(a) * Math.cos(el) * d, Math.sin(el) * d, Math.sin(a) * Math.cos(el) * d);
+    m.lookAt(0, 0, 0);
+    s.add(m);
+  }
+  const pm = new THREE.PMREMGenerator(renderer);
+  const tex = pm.fromScene(s, 0.02).texture;
+  pm.dispose();
+  s.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+  return tex;
+}
+
+// ------------------------------------------------------------------ floodlight towers along the circuit
+// Tall steel masts behind the fences with banks of projectors aimed at the track. The light itself comes from
+// the baked flood field (floodlight.js); the masts get emissive lenses and distance-scaled glare sprites.
 function buildFloodlights(track, quality) {
   const group = new THREE.Group();
-  const step = 55;
-  const poleGeo = new THREE.CylinderGeometry(0.16, 0.24, 14, 6); poleGeo.translate(0, 7, 0);
-  const headGeo = new THREE.BoxGeometry(2.6, 0.5, 0.9);
-  const poles = [], heads = [];
-  for (let s = 0, k = 0; s < track.length; s += step, k++) {
+  const street = track.style === 'street';
+  const spacing = street ? 26 : 30;
+  const P = track.pit;
+  const lamps = [], visible = [];
+  for (let s = 0, k = 0; s < track.length; s += spacing, k++) {
     const i = track.indexAtS(s);
     const side = k % 2 ? 1 : -1;
     const wall = side === 1 ? track.wallL[i] : track.wallR[i];
-    const off = Math.max(wall + 1.6, track.hw + 4);
-    const x = track.px[i] + track.nx[i] * side * off, z = track.pz[i] + track.nz[i] * side * off, y = track.py[i];
-    poles.push(new THREE.Matrix4().makeTranslation(x, y, z));
-    const hx = track.px[i] + track.nx[i] * side * (off - 1.6), hz = track.pz[i] + track.nz[i] * side * (off - 1.6);
-    const rot = new THREE.Matrix4().makeRotationY(Math.atan2(track.tx[i], track.tz[i]));
-    heads.push({ m: new THREE.Matrix4().makeTranslation(hx, y + 14.2, hz).multiply(rot), x: hx, y: y + 13.8, z: hz, i });
+    const off = Math.min(wall + (street ? 1.3 : 2.4), track.hw + 60);
+    const x = track.px[i] + track.nx[i] * side * off, z = track.pz[i] + track.nz[i] * side * off;
+    const L = { x, z, i, side, off };
+    lamps.push(L);
+    if (P && P.inPit[i] && side === P.side) continue; // lamps on the pit building roof: light only
+    if (track.distanceToTrack(x, z, off + 10) < Math.min(off, track.hw + 6) - 0.5) continue; // inside another part of the circuit
+    visible.push(L);
   }
-  const pm = new THREE.InstancedMesh(poleGeo, new THREE.MeshStandardMaterial({ color: 0x51565c, roughness: 0.5, metalness: 0.6 }), poles.length);
-  poles.forEach((m, k) => pm.setMatrixAt(k, m));
-  const hm = new THREE.InstancedMesh(headGeo, new THREE.MeshStandardMaterial({ color: 0xfff6e0, emissive: 0xfff2d8, emissiveIntensity: 3.2, roughness: 0.4 }), heads.length);
-  heads.forEach((h, k) => hm.setMatrixAt(k, h.m));
-  group.add(pm, hm);
-  const pos = new Float32Array(heads.length * 3);
-  heads.forEach((h, k) => pos.set([h.x, h.y - 0.3, h.z], k * 3));
-  const gg = new THREE.BufferGeometry(); gg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const halos = new THREE.Points(gg, new THREE.PointsMaterial({ map: lampGlowTexture(), size: 9, color: 0xfff0d0, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.85 }));
-  group.add(halos);
-  const nSpots = quality === 'low' ? 3 : quality === 'medium' ? 5 : 7;
-  const spots = [];
-  for (let k = 0; k < nSpots; k++) {
-    const sp = new THREE.SpotLight(0xfff1dc, 520, 95, 1.05, 0.65, 1.3);
-    group.add(sp, sp.target);
-    spots.push(sp);
-  }
-  let last = -1;
-  const update = (px, pz, i0) => {
-    if (i0 === last) return; // only re-pick when the player moved to a new track sample
-    last = i0;
-    const near = heads.map(h => [h, (h.x - px) ** 2 + (h.z - pz) ** 2]).sort((a, b) => a[1] - b[1]).slice(0, nSpots);
-    near.forEach(([h], k) => {
-      const sp = spots[k];
-      sp.position.set(h.x, h.y, h.z);
-      sp.target.position.set(track.px[h.i], track.py[h.i], track.pz[h.i]);
-      sp.target.updateMatrixWorld();
-    });
-  };
-  return { group, update };
+  const field = buildFloodField(track, lamps, spacing);
+  const H = street ? 13 : 16;
+  const steel = new THREE.MeshStandardMaterial({ color: 0x4a4f56, roughness: 0.45, metalness: 0.75 });
+  const housingMat = new THREE.MeshStandardMaterial({ color: 0x1d2024, roughness: 0.5, metalness: 0.5 });
+  const lensMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(7, 6.8, 6.3), fog: false });
+  const poleGeo = new THREE.CylinderGeometry(0.11, 0.2, 1, 8); poleGeo.translate(0, 0.5, 0);
+  const frameGeo = new THREE.BoxGeometry(2.25, 1.15, 0.1);
+  const houseGeo = new THREE.BoxGeometry(0.52, 0.4, 0.36);
+  const lensGeo = new THREE.PlaneGeometry(0.44, 0.32);
+  const nV = visible.length, per = 6;
+  const poles = new THREE.InstancedMesh(poleGeo, steel, nV), frames = new THREE.InstancedMesh(frameGeo, steel, nV);
+  const houses = new THREE.InstancedMesh(houseGeo, housingMat, nV * per), lenses = new THREE.InstancedMesh(lensGeo, lensMat, nV * per);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), v = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), sc = new THREE.Vector3();
+  const glarePos = new Float32Array(nV * 3), glareDir = new Float32Array(nV * 3);
+  visible.forEach((L, k) => {
+    const y0 = track.py[L.i] - 0.6, top = track.py[L.i] + H;
+    sc.set(1, H + 0.6, 1); m4.compose(v.set(L.x, y0, L.z), q.identity(), sc); poles.setMatrixAt(k, m4);
+    // bank faces the aim point, tilted down towards the racing surface
+    const yaw = Math.atan2(track.px[L.i] - L.x, track.pz[L.i] - L.z);
+    const tilt = Math.atan2(H - 1, L.off) * 0.85;
+    e.set(tilt, yaw, 0, 'YXZ'); q.setFromEuler(e);
+    m4.compose(v.set(L.x, top, L.z), q, one); frames.setMatrixAt(k, m4);
+    for (let j = 0; j < per; j++) {
+      const lx = (j % 3 - 1) * 0.68, ly = j < 3 ? 0.24 : -0.24;
+      const hp = new THREE.Vector3(lx, ly, 0.24).applyQuaternion(q).add(v);
+      m4.compose(hp, q, one); houses.setMatrixAt(k * per + j, m4);
+      const lp = new THREE.Vector3(lx, ly, 0.425).applyQuaternion(q).add(v);
+      m4.compose(lp, q, one); lenses.setMatrixAt(k * per + j, m4);
+    }
+    const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+    const gp = new THREE.Vector3(0, 0, 0.7).applyQuaternion(q).add(v);
+    glarePos.set([gp.x, gp.y, gp.z], k * 3); glareDir.set([fwd.x, fwd.y, fwd.z], k * 3);
+  });
+  for (const im of [poles, frames, houses, lenses]) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); group.add(im); }
+  poles.castShadow = frames.castShadow = quality !== 'low';
+  const gg = new THREE.BufferGeometry();
+  gg.setAttribute('position', new THREE.BufferAttribute(glarePos, 3));
+  gg.setAttribute('aim', new THREE.BufferAttribute(glareDir, 3));
+  const glare = new THREE.Points(gg, new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+    uniforms: { map: { value: glareTexture() }, pr: { value: 1 }, vh: { value: 800 } },
+    vertexShader: `attribute vec3 aim; uniform float pr; uniform float vh; varying float vA;
+      void main(){
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        float d = max(1.0, -mv.z);
+        vec3 toCam = normalize(cameraPosition - position);
+        float face = max(0.0, dot(toCam, aim));
+        vA = (0.25 + 0.75 * face) * (0.55 + 0.45 * smoothstep(900.0, 60.0, d));
+        gl_PointSize = clamp(vh * 2.4 / d, 5.0 * pr, vh * 0.2) * (0.7 + 0.5 * face);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `uniform sampler2D map; varying float vA;
+      void main(){ vec4 t = texture2D(map, gl_PointCoord); gl_FragColor = vec4(t.rgb * vec3(1.0, 0.97, 0.9), t.a * vA); }`,
+  }));
+  glare.frustumCulled = false;
+  glare.renderOrder = 4;
+  group.add(glare);
+  return { group, field, glare };
 }
 // ------------------------------------------------------------------ falling rain (instanced streaks around the camera)
 // Falling rain, animated 100% on the GPU: the geometry never changes, the vertex shader moves every
@@ -366,15 +434,19 @@ export class Weather {
     const moonDir = new THREE.Vector3(-0.45, 0.42, 0.62).normalize();
     this.night = buildNightSky(moonDir);
     this.group.add(this.night.group);
-    // moonlight keeps shadows + shape; ambient is generous so the track is never pitch black
-    this.sun.color.set(0xa9bce8); this.sun.intensity = 0.9;
-    this.sun.userData.dir = moonDir.clone();
-    this.hemi.color.set(0x5d6f9c); this.hemi.groundColor.set(0x2a2622); this.hemi.intensity = 1.05;
-    this.scene.environmentIntensity = 0.35;
-    this.scene.fog = new THREE.Fog(0x0e1426, 220, 3600);
-    this.baseExposure = 1.05;
+    // a high key light stands in for the banks of floodlights overhead (crisp car shadows); moon/sky fill is faint
+    this.sun.color.set(0xe4eaf6); this.sun.intensity = 0.6;
+    this.sun.userData.dir = new THREE.Vector3(0.2, 1, 0.12).normalize();
+    this.hemi.color.set(0x26324f); this.hemi.groundColor.set(0x0c0c0f); this.hemi.intensity = 0.3;
+    this.envTex = nightEnvironment(this.renderer);
+    this.scene.environment = this.envTex;
+    this.scene.environmentIntensity = 0.6;
+    this.scene.fog = new THREE.Fog(0x0a0d16, 170, 2600);
+    this.baseExposure = 1.0;
     this.lights = buildFloodlights(track, quality);
     this.group.add(this.lights.group);
+    enableFlood(this.lights.field);
+    this.scenery?.setNight?.(true);
   }
 
   setupRain(track, quality) {
@@ -394,7 +466,11 @@ export class Weather {
   setScale(h) {
     this.scaleH = h;
     if (this.spray) this.spray.points.material.uniforms.scale.value = h * 0.6;
-    if (this.night) this.night.stars.material.uniforms.pr.value = Math.max(1, h / 700);
+    if (this.night) {
+      this.night.stars.material.uniforms.pr.value = Math.max(1, h / 700);
+      this.lights.glare.material.uniforms.vh.value = h;
+      this.lights.glare.material.uniforms.pr.value = Math.max(1, h / 700);
+    }
   }
 
   // rooster tail of spray from the rear tyres: more with speed
@@ -430,7 +506,7 @@ export class Weather {
     if (this.night) {
       this.night.group.position.copy(camPos);
       this.night.stars.material.uniforms.time.value = this.t;
-      this.lights.update(player.phys.x, player.phys.z, player.proj.i);
+      this.night.dome.material.uniforms.time.value = this.t;
     }
     const w = this.wetness;
     if (this.storm) { this.storm.position.copy(camPos); this.storm.material.uniforms.time.value = this.t; this.storm.material.uniforms.flash.value = this.flash; }
@@ -468,6 +544,7 @@ export class Weather {
   apply() { this.renderer.toneMappingExposure = this.baseExposure; }
   hideLens() { if (this.lens) this.lens.setVisible(false); }
   dispose() {
+    if (this.night) { disableFlood(); this.lights.field.tex.dispose(); this.envTex?.dispose(); }
     this.sky.visible = true;
     this.scene.remove(this.group);
     if (this.lens) this.lens.dispose();

@@ -47,7 +47,7 @@ export function raceReward({ pos, laps, aiSkill, fastestLap, gained, handling })
 
 // Player handling difficulty: surface grip/drag overrides + steering help
 export const HANDLING = {
-  easy: { name: 'EASY', grip: 1.06, steerBoost: 1.25, counter: 1.4, surf: { runoff: [0.98, 0.0], grass: [0.93, 0.015], gravel: [0.9, 0.03], kerb: [0.98, 0.0] } },
+  easy: { name: 'EASY', grip: 1.1, steerBoost: 1.3, counter: 1.4, surf: { runoff: [0.98, 0.0], grass: [0.93, 0.015], gravel: [0.9, 0.03], kerb: [0.98, 0.0] } },
   medium: { name: 'MEDIUM', grip: 1.02, steerBoost: 1.1, counter: 1.0, surf: { runoff: [0.92, 0.02], grass: [0.75, 0.05], gravel: [0.66, 0.12], kerb: [0.95, 0.01] } },
   hard: { name: 'HARD', grip: 1.0, steerBoost: 1.0, counter: 0.8, surf: null },
 };

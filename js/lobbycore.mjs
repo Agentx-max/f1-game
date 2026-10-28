@@ -5,7 +5,7 @@
 export const PROTOCOL = 1;
 const TRACK_IDS = ['it-1922', 'gb-1948', 'be-1925', 'at-1969', 'az-2016', 'mc-1929'];
 const TEAM_IDS = ['mercedes', 'ferrari', 'redbull', 'forceindia', 'williams', 'renault', 'tororosso', 'haas', 'mclaren', 'sauber'];
-const TYRES = ['supersoft', 'soft', 'medium', 'hard'];
+const TYRES = ['supersoft', 'soft', 'medium', 'hard', 'inter', 'wet'];
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I/L
 const MAX_CARS = 20;
 const LOAD_TIMEOUT = 30000, FINISH_GRACE = 60000, RACE_TIMEOUT = 45 * 60000;

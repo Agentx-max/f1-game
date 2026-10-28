@@ -760,6 +760,8 @@ export function buildScenery(track, quality, sunDir) {
 
   return {
     group, heightAt, rlMesh, updateRacingLine, pit: pitInfo,
+    // backlit billboards / pit banners glow at night
+    setNight(on) { group.traverse(o => { const m = o.material; if (m && m.emissiveMap) m.emissiveIntensity = on ? 1.15 : 0.25; }); },
     setLights(n) { lightMats.forEach((m, k) => { m.emissiveIntensity = k < n ? 8 : 0; m.color.set(k < n ? 0xff2020 : 0x220000); }); },
   };
 }

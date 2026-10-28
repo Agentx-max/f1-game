@@ -429,9 +429,12 @@ export function carbon() {
 export function tyreWall(compound, blur = false) {
   const key = 'tyre' + compound + blur;
   if (cache[key]) return cache[key];
-  const S = blur ? 256 : 512;
+  const S = blur ? 256 : 1024;
   const c = canvas(S, S), ctx = c.getContext('2d');
   ctx.fillStyle = '#151515'; ctx.fillRect(0, 0, S, S);
+  // rubber sidewall grain + moulded rings (HD)
+  for (let i = 0; i < (blur ? 300 : 5000); i++) { ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.03})`; ctx.fillRect(Math.random() * S, Math.random() * S, 2, 2); }
+  for (const r of [0.47, 0.455, 0.35]) { ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = S * 0.003; ctx.beginPath(); ctx.arc(S / 2, S / 2, S * r, 0, Math.PI * 2); ctx.stroke(); }
   const cx = S / 2, cy = S / 2;
   // rim
   const rr = S * 0.31;
@@ -480,8 +483,8 @@ export function tyreWall(compound, blur = false) {
     }
   };
   for (let k = 0; k < 2; k++) {
-    drawArc('P ZERO', -Math.PI * 0.85 + k * Math.PI, '#e8e8e8', 40);
-    drawArc('PIRELLI', -Math.PI * 0.35 + k * Math.PI, compound, 36);
+    drawArc('P ZERO', -Math.PI * 0.85 + k * Math.PI, '#e8e8e8', 40 * S / 512);
+    drawArc('PIRELLI', -Math.PI * 0.35 + k * Math.PI, compound, 36 * S / 512);
   }
   return (cache[key] = toTexture(c, { repeat: false }));
 }

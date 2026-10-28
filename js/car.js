@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import * as TX from './textures.js';
 import { sponsorTexture, TEAM_SPONSORS } from './sponsors.js';
+import { solveTwoBone, smooth } from './ik.js';
 
 // Car local frame: +z forward, +y up, +x = car's left. Units: metres. 2018-spec dimensions.
 const Z_MIN = -2.85, Z_MAX = 2.95, Y_MAX = 1.05;
@@ -283,7 +284,24 @@ function sharedMats() {
   return shared;
 }
 
-const COMPOUNDS = { soft: '#e8202a', medium: '#ffd200', hard: '#f0f0f0', ultrasoft: '#a0168c', supersoft: '#e8202a' };
+const COMPOUNDS = { soft: '#e8202a', medium: '#ffd200', hard: '#f0f0f0', ultrasoft: '#a0168c', supersoft: '#a0168c', inter: '#3fb02a', wet: '#1f6fd6' };
+// wet track: rubber turns dark and glossy
+export function setTyreWetness(w) { const m = sharedMats().tyre; m.roughness = 0.9 - 0.55 * w; m.color.setScalar(0.1 - 0.03 * w); }
+
+// soft contact shadow under every car (always on, any light, any distance) so cars sit on the road
+let contactTex = null;
+function contactShadowTexture() {
+  if (contactTex) return contactTex;
+  const c = document.createElement('canvas'); c.width = 128; c.height = 256;
+  const x = c.getContext('2d');
+  x.filter = 'blur(10px)';
+  x.fillStyle = 'rgba(0,0,0,0.9)';
+  x.beginPath(); x.roundRect(24, 20, 80, 216, 30); x.fill();
+  x.fillStyle = 'rgba(0,0,0,0.6)';
+  for (const [cx, cy] of [[22, 52], [106, 52], [22, 196], [106, 196]]) { x.beginPath(); x.ellipse(cx, cy, 14, 24, 0, 0, Math.PI * 2); x.fill(); }
+  contactTex = new THREE.CanvasTexture(c);
+  return contactTex;
+}
 
 const sponsorMats = {};
 function sponsorMat(id) {
@@ -522,18 +540,20 @@ function buildTemplate(team) {
   flapLogo.rotateX(-Math.PI / 2); flapLogo.rotateY(Math.PI);
   flapLogo.translate(0, 0.016, -0.12);
 
-  // wheels
+  // wheels (HD: dense lathe with rounded shoulders and a slightly bulged sidewall)
   const tyreGeo = (w) => {
-    const hw = w / 2, pts = [
-      [0.2, -hw], [0.28, -hw], [0.315, -hw * 0.93], [0.329, -hw * 0.78], [0.332, -hw * 0.4], [0.332, hw * 0.4], [0.329, hw * 0.78], [0.315, hw * 0.93], [0.28, hw], [0.2, hw],
-    ].map(([r, y]) => new THREE.Vector2(r, y));
-    const g = new THREE.LatheGeometry(pts, 48);
+    const hw = w / 2, pts = [[0.2, -hw * 0.99]];
+    for (let k = 0; k <= 8; k++) { const a = (k / 8) * Math.PI / 2; pts.push([0.302 + Math.sin(a) * 0.03, -hw + (1 - Math.cos(a)) * hw * 0.16 - Math.sin(a) * 0.004 * 0]); }
+    for (let k = 1; k < 8; k++) pts.push([0.332 + Math.sin(k / 8 * Math.PI) * 0.0012, -hw * 0.84 + (k / 8) * hw * 1.68]);
+    for (let k = 8; k >= 0; k--) { const a = (k / 8) * Math.PI / 2; pts.push([0.302 + Math.sin(a) * 0.03, hw - (1 - Math.cos(a)) * hw * 0.16]); }
+    pts.push([0.2, hw * 0.99]);
+    const g = new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), 112);
     g.rotateZ(Math.PI / 2);
     return g;
   };
   const discGeo = (w) => {
-    const a = new THREE.CircleGeometry(0.322, 40); a.rotateY(Math.PI / 2); a.translate(w / 2 + 0.002, 0, 0);
-    const b = new THREE.CircleGeometry(0.322, 40); b.rotateY(-Math.PI / 2); b.translate(-w / 2 - 0.002, 0, 0);
+    const a = new THREE.CircleGeometry(0.322, 80); a.rotateY(Math.PI / 2); a.translate(w / 2 + 0.002, 0, 0);
+    const b = new THREE.CircleGeometry(0.322, 80); b.rotateY(-Math.PI / 2); b.translate(-w / 2 - 0.002, 0, 0);
     return mergeGeometries([prep(a), prep(b)]);
   };
   const decalMeshes = [...decals.entries()].map(([id, geos]) => ({ geo: mergeGeometries(geos), mat: id === 'team' ? logoMat : sponsorMat(id) }));
@@ -568,207 +588,377 @@ function makeWheel(tpl, front, compound) {
   return { steer, spin, disc, compound };
 }
 
+// tyre + rim exactly like the car's own wheel, used by the pit crew (old tyre off, new tyre on)
+export function makeWheelProp(team, front, compound) {
+  const tpl = buildTemplate(team);
+  const g = new THREE.Group();
+  const tyre = new THREE.Mesh(front ? tpl.tyreF : tpl.tyreR, sharedMats().tyre);
+  tyre.castShadow = true;
+  const disc = new THREE.Mesh(front ? tpl.discF : tpl.discR, wallMat(compoundColor(compound), false));
+  g.add(tyre, disc);
+  g.userData.setCompound = c => { disc.material = wallMat(compoundColor(c), false); };
+  return g;
+}
+
 // ---------- F1 steering wheel ----------
+// Wheel-local frame ("spin" group): +x = driver's left, +y up, front face looks at the driver (-z).
+const FACE_Z = -0.0142;
+// thumb buttons: [x, y, colour, id]
+const BUTTONS = [
+  [0.086, 0.04, '#19c45c', 'drs'], [0.09, 0.018, '#ff7a00', 'pit'], [0.09, -0.004, '#ffd200', null], [0.084, -0.026, '#9a4dff', null],
+  [-0.086, 0.04, '#e10600', 'ot'], [-0.09, 0.018, '#1e8cff', 'box'], [-0.09, -0.004, '#f2f2f2', null], [-0.084, -0.026, '#ffd200', null],
+  [0.036, -0.031, '#f2f2f2', null], [-0.036, -0.031, '#19c45c', null],
+];
+const ROTARIES = [[0.049, -0.053, 0.0108, '#16171a'], [-0.049, -0.053, 0.0108, '#16171a'], [0, -0.051, 0.0122, '#f2c21b'], [0, -0.0745, 0.0078, '#16171a'], [0.062, 0.054, 0.0062, '#16171a'], [-0.062, 0.054, 0.0062, '#16171a']];
+const RAINBOW = ['#ff2a2a', '#ff7a00', '#ffd200', '#a6e400', '#19c45c', '#00c8c8', '#1e8cff', '#6a4cff', '#c040ff', '#ff40a0', '#ff2a2a', '#ff7a00'];
+
+function roundBox(w, h, d, r, seg = 2) {
+  const g = new THREE.BoxGeometry(w, h, d, seg * 2, seg * 2, seg * 2);
+  const p = g.attributes.position, n = g.attributes.normal, v = new THREE.Vector3(), c = new THREE.Vector3();
+  const hw = w / 2 - r, hh = h / 2 - r, hd = d / 2 - r;
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    c.set(Math.max(-hw, Math.min(hw, v.x)), Math.max(-hh, Math.min(hh, v.y)), Math.max(-hd, Math.min(hd, v.z)));
+    v.sub(c).normalize(); n.setXYZ(i, v.x, v.y, v.z);
+    v.multiplyScalar(r).add(c); p.setXYZ(i, v.x, v.y, v.z);
+  }
+  return g;
+}
+
 let swGeo = null;
 function steeringGeometry() {
   if (swGeo) return swGeo;
-  const outline = [[-0.1, 0.058], [0.1, 0.058], [0.118, 0.045], [0.118, -0.035], [0.085, -0.062], [-0.085, -0.062], [-0.118, -0.035], [-0.118, 0.045]];
-  const shape = new THREE.Shape(outline.map(([x, y]) => new THREE.Vector2(x, y)));
-  const body = new THREE.ExtrudeGeometry(shape, { depth: 0.022, bevelEnabled: true, bevelThickness: 0.004, bevelSize: 0.004, bevelSegments: 2, curveSegments: 4 });
+  const half = [[0, 0.066], [0.066, 0.066], [0.091, 0.061], [0.103, 0.047], [0.107, 0.028], [0.107, -0.03], [0.099, -0.055], [0.075, -0.073], [0.034, -0.082], [0, -0.0835]];
+  const ring = [...half, ...half.slice(1, -1).reverse().map(([x, y]) => [-x, y])].map(([x, y]) => new THREE.Vector2(x, y));
+  const shape = new THREE.Shape(); shape.moveTo(ring[0].x, ring[0].y); shape.splineThru([...ring.slice(1), ring[0]]);
+  const body = new THREE.ExtrudeGeometry(shape, { depth: 0.022, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.003, bevelSegments: 3, curveSegments: 40 });
   body.translate(0, 0, -0.011);
-  const grip = new THREE.CapsuleGeometry(0.023, 0.085, 4, 12);
-  const btn = new THREE.CylinderGeometry(0.0072, 0.0072, 0.006, 14); btn.rotateX(Math.PI / 2);
-  const knob = new THREE.CylinderGeometry(0.0095, 0.0105, 0.013, 16); knob.rotateX(Math.PI / 2);
-  const marker = new THREE.BoxGeometry(0.002, 0.007, 0.002);
-  const hub = new THREE.CylinderGeometry(0.028, 0.032, 0.05, 16); hub.rotateX(Math.PI / 2);
-  const column = new THREE.CylinderGeometry(0.014, 0.016, 0.22, 10); column.rotateX(Math.PI / 2);
-  const paddle = new THREE.BoxGeometry(0.075, 0.034, 0.004); paddle.translate(0.0375, 0, 0);
-  const display = new THREE.PlaneGeometry(0.15, 0.072); display.rotateY(Math.PI);
+  const prof = [[0, -0.064], [0.012, -0.063], [0.019, -0.058], [0.0236, -0.045], [0.0252, -0.026], [0.0238, 0.0], [0.0216, 0.024], [0.0206, 0.044], [0.0172, 0.058], [0.01, 0.0632], [0, 0.064]].map(([r, y]) => new THREE.Vector2(r, y));
+  const grip = new THREE.LatheGeometry(prof, 24);
+  const display = new THREE.PlaneGeometry(0.106, 0.06); display.rotateY(Math.PI);
+  const bezel = roundBox(0.12, 0.074, 0.005, 0.0022);
+  const face = new THREE.PlaneGeometry(0.22, 0.155); face.rotateY(Math.PI);
+  const btn = new THREE.CylinderGeometry(0.0064, 0.0066, 0.0055, 20); btn.rotateX(Math.PI / 2);
+  const btnRing = new THREE.TorusGeometry(0.0078, 0.0012, 6, 22);
+  const knob = new THREE.CylinderGeometry(1, 1.04, 1, 36, 1); knob.rotateX(Math.PI / 2);
+  { // knurled edge
+    const p = knob.attributes.position;
+    for (let i = 0; i < p.count; i++) { const x = p.getX(i), y = p.getY(i), r = Math.hypot(x, y); if (r > 0.9) { const a = Math.atan2(y, x), k = 1 + 0.035 * Math.sign(Math.cos(a * 18)); p.setXY(i, x * k, y * k); } }
+    knob.computeVertexNormals();
+  }
+  const marker = new THREE.BoxGeometry(0.0016, 0.006, 0.0015);
+  const hub = new THREE.CylinderGeometry(0.03, 0.034, 0.03, 22); hub.rotateX(Math.PI / 2);
+  const column = new THREE.CylinderGeometry(0.016, 0.018, 0.24, 14); column.rotateX(Math.PI / 2);
+  const paddleShape = new THREE.Shape([[0, -0.016], [0.058, -0.022], [0.074, -0.012], [0.074, 0.016], [0.05, 0.022], [0, 0.018]].map(([x, y]) => new THREE.Vector2(x, y)));
+  const paddle = new THREE.ExtrudeGeometry(paddleShape, { depth: 0.004, bevelEnabled: true, bevelThickness: 0.001, bevelSize: 0.001, bevelSegments: 1 });
+  const clutch = new THREE.BoxGeometry(0.046, 0.016, 0.004); clutch.translate(0.023, 0, 0);
   const glove = new THREE.SphereGeometry(0.03, 14, 10); glove.scale(1.05, 1.5, 1.15);
-  const arm = new THREE.CapsuleGeometry(0.032, 0.2, 4, 10);
-  swGeo = { body, grip, btn, knob, marker, hub, column, paddle, display, glove, arm };
+  swGeo = { body, grip, display, bezel, face, btn, btnRing, knob, marker, hub, column, paddle, clutch, glove };
   return swGeo;
 }
 
-const BTN_COLORS = ['#e10600', '#ffd200', '#1e8cff', '#00d26a', '#ff8c00', '#ffffff'];
 const btnMats = {};
 function btnMat(col) {
-  if (!btnMats[col]) btnMats[col] = new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.15, roughness: 0.35 });
+  if (!btnMats[col]) btnMats[col] = new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.12, roughness: 0.32 });
   return btnMats[col];
 }
+
+// printed wheel face: labels, colour-coded rotary rings, team accents (transparent overlay on the carbon)
+const faceTex = {};
+function wheelFaceTexture(accent) {
+  if (faceTex[accent]) return faceTex[accent];
+  const W = 1024, H = 722, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  const PX = v => (0.11 - v) / 0.22 * W, PY = v => (0.0695 - v) / 0.155 * H, S = v => v / 0.22 * W;
+  const ring = (cx, cy, r, n, w) => {
+    const a0 = Math.PI * 0.8, a1 = Math.PI * 2.2;
+    for (let k = 0; k < n; k++) {
+      x.strokeStyle = RAINBOW[k % RAINBOW.length]; x.lineWidth = S(w);
+      x.beginPath(); x.arc(PX(cx), PY(cy), S(r), a0 + (a1 - a0) * k / n + 0.03, a0 + (a1 - a0) * (k + 1) / n - 0.03); x.stroke();
+    }
+    x.fillStyle = '#d8dce2'; x.font = `700 ${S(0.0034)}px "Titillium Web", Arial, sans-serif`; x.textAlign = 'center'; x.textBaseline = 'middle';
+    for (let k = 0; k < n; k++) { const a = a0 + (a1 - a0) * (k + 0.5) / n; x.fillText(String(k + 1), PX(cx) + Math.cos(a) * S(r + w * 1.35), PY(cy) + Math.sin(a) * S(r + w * 1.35)); }
+  };
+  ring(0.049, -0.053, 0.0148, 10, 0.0032);
+  ring(-0.049, -0.053, 0.0148, 10, 0.0032);
+  ring(0, -0.051, 0.0165, 12, 0.0036);
+  ring(0, -0.0745, 0.0104, 8, 0.0026);
+  const label = (txt, cx, cy, size = 0.0042, col = '#e8ebef') => { x.fillStyle = col; x.font = `700 ${S(size)}px "Titillium Web", Arial, sans-serif`; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(txt, PX(cx), PY(cy)); };
+  const names = ['DRS', 'PL', 'BB+', 'N', 'OT', 'BOX', 'ACK', 'BB-', 'MARK', 'OK'];
+  BUTTONS.forEach(([bx, by], k) => {
+    x.strokeStyle = 'rgba(255,255,255,0.35)'; x.lineWidth = S(0.0007);
+    x.beginPath(); x.arc(PX(bx), PY(by), S(0.0094), 0, Math.PI * 2); x.stroke();
+    label(names[k], bx + (k < 8 ? -Math.sign(bx) * 0.0155 : 0), by + (k < 8 ? 0 : -0.0115), 0.0036);
+  });
+  label('STRAT', 0.049, -0.034, 0.0034); label('ENTRY', -0.049, -0.034, 0.0034); label('MODE', 0.025, -0.069, 0.0032); label('DIFF', -0.025, -0.069, 0.0032);
+  // team accent stripes along the top edge and the grip roots
+  x.fillStyle = accent;
+  x.fillRect(PX(0.06), PY(0.0655), S(0.12), S(0.0016));
+  for (const s of [1, -1]) { x.save(); x.translate(PX(s * 0.104), PY(0.0)); x.fillRect(-S(0.0012), -S(0.03), S(0.0024), S(0.06)); x.restore(); }
+  x.fillStyle = 'rgba(255,255,255,0.75)'; x.font = `900 italic ${S(0.0045)}px "Titillium Web", Arial, sans-serif`; x.textAlign = 'center';
+  x.fillText('TECHKEY', PX(0), PY(0.0605));
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return (faceTex[accent] = t);
+}
+
 let staticDash = null;
-function makeDashCanvas() {
-  const c = document.createElement('canvas'); c.width = 512; c.height = 246;
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+function makeDashCanvas(w = 640, h = 360) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
   return { c, ctx: c.getContext('2d'), t };
 }
-// draws LEDs + display. info: {rpm, gear, speed, ers, drs, drsAvail, ersOn, delta, lap, pos, bias}
+// steering wheel screen. info: {rpm, gear, speed, ers, drs, drsAvail, ersOn, delta, lap, pos, bias, last, tyre, pit}
 function drawDash(d, info) {
-  const { ctx, c } = d, W = c.width, H = c.height;
-  ctx.fillStyle = '#050506'; ctx.fillRect(0, 0, W, H);
+  const { ctx, c } = d, W = c.width, H = c.height, k = W / 640;
+  const F = (w, s) => `${w} ${Math.round(s * k)}px "Titillium Web", Arial, sans-serif`;
+  ctx.fillStyle = '#030304'; ctx.fillRect(0, 0, W, H);
+  // shift lights
   const lit = Math.round(Math.max(0, Math.min(1, (info.rpm - 0.72) / 0.25)) * 15);
   const flash = info.rpm > 0.975 && Math.floor(performance.now() / 70) % 2 === 0;
-  for (let k = 0; k < 15; k++) {
-    const x = 26 + k * 32.5, y = 22;
-    let col = '#1b1b20';
-    if (flash) col = '#3a6bff';
-    else if (k < lit) col = k < 5 ? '#00e05a' : k < 10 ? '#ff2020' : '#3a6bff';
-    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, 10, 0, Math.PI * 2); ctx.fill();
+  for (let i = 0; i < 15; i++) {
+    const cx = (52 + i * 38) * k, cy = 24 * k;
+    let col = '#16161b';
+    if (info.pit) col = i % 2 === Math.floor(performance.now() / 250) % 2 ? '#ffd200' : '#16161b';
+    else if (flash) col = '#4f7bff';
+    else if (i < lit) col = i < 5 ? '#19e05a' : i < 10 ? '#ff2626' : '#4f7bff';
+    if (col !== '#16161b') { ctx.fillStyle = col; ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.arc(cx, cy, 15 * k, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(cx, cy, 10 * k, 0, Math.PI * 2); ctx.fill();
   }
-  // screen
-  ctx.fillStyle = '#0d1016'; ctx.fillRect(14, 44, W - 28, H - 56);
-  ctx.strokeStyle = '#2a2f3a'; ctx.lineWidth = 3; ctx.strokeRect(14, 44, W - 28, H - 56);
+  // panel frame
+  ctx.fillStyle = '#0b0e14'; ctx.fillRect(10 * k, 48 * k, W - 20 * k, H - 58 * k);
+  ctx.strokeStyle = '#273042'; ctx.lineWidth = 2 * k; ctx.strokeRect(10 * k, 48 * k, W - 20 * k, H - 58 * k);
+  ctx.strokeStyle = '#1b2230'; ctx.beginPath(); ctx.moveTo(216 * k, 56 * k); ctx.lineTo(216 * k, 262 * k); ctx.moveTo(424 * k, 56 * k); ctx.lineTo(424 * k, 262 * k); ctx.stroke();
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
-  ctx.font = 'bold 128px "Titillium Web", Arial, sans-serif';
-  ctx.fillText(info.gear, W / 2, 132);
-  ctx.textAlign = 'left'; ctx.font = 'bold 52px "Titillium Web", Arial, sans-serif';
-  ctx.fillText(String(info.speed), 30, 100);
-  ctx.font = '600 20px "Titillium Web", Arial, sans-serif'; ctx.fillStyle = '#8a93a6';
-  ctx.fillText('KPH', 30, 138);
-  ctx.fillText('P' + info.pos + '  L' + info.lap, 30, 168);
+  // left column: lap, delta, last lap
+  ctx.textAlign = 'left'; ctx.fillStyle = '#8b95a8'; ctx.font = F(700, 22);
+  ctx.fillText('LAP ' + info.lap, 26 * k, 76 * k);
+  ctx.fillText('DELTA', 26 * k, 118 * k);
+  ctx.font = F(700, 46); ctx.fillStyle = info.delta == null ? '#5d6678' : info.delta < 0 ? '#19e05a' : '#ff3b3b';
+  ctx.fillText(info.delta == null ? '--.--' : (info.delta < 0 ? '-' : '+') + Math.abs(info.delta).toFixed(2), 26 * k, 158 * k);
+  ctx.fillStyle = '#8b95a8'; ctx.font = F(700, 20); ctx.fillText('LAST', 26 * k, 204 * k);
+  ctx.fillStyle = '#e9edf3'; ctx.font = F(700, 30); ctx.fillText(info.last || '-:--.---', 26 * k, 236 * k);
+  // centre: gear
+  ctx.textAlign = 'center';
+  ctx.fillStyle = info.rpm > 0.965 ? '#4f7bff' : '#ffffff'; ctx.font = F(700, 170);
+  ctx.fillText(info.gear, 320 * k, 166 * k);
+  ctx.fillStyle = '#8b95a8'; ctx.font = F(700, 20); ctx.fillText(info.pit ? 'PIT LIMITER' : 'P' + info.pos, 320 * k, 250 * k);
+  // right column: speed, brake balance, tyres
   ctx.textAlign = 'right';
-  ctx.fillText('DELTA', W - 30, 72);
-  ctx.font = 'bold 40px "Titillium Web", Arial, sans-serif';
-  ctx.fillStyle = info.delta == null ? '#8a93a6' : info.delta < 0 ? '#00e05a' : '#ff3b3b';
-  ctx.fillText(info.delta == null ? '--' : (info.delta < 0 ? '-' : '+') + Math.abs(info.delta).toFixed(2), W - 30, 106);
-  ctx.font = '600 20px "Titillium Web", Arial, sans-serif'; ctx.fillStyle = '#8a93a6';
-  ctx.fillText('BBAL ' + info.bias + '%', W - 30, 140);
-  // ERS bar + DRS
-  ctx.fillStyle = '#222'; ctx.fillRect(30, 196, 300, 18);
-  ctx.fillStyle = info.ersOn ? '#3ad1ff' : '#ffd200'; ctx.fillRect(30, 196, 300 * info.ers, 18);
-  ctx.fillStyle = '#8a93a6'; ctx.textAlign = 'left'; ctx.font = '600 16px "Titillium Web", Arial, sans-serif';
-  ctx.fillText(info.ersOn ? 'ERS OVERTAKE' : 'ERS', 338, 205);
-  ctx.fillStyle = info.drs ? '#00e05a' : '#0d1016'; ctx.strokeStyle = info.drsAvail || info.drs ? '#00e05a' : '#333';
-  ctx.fillRect(W - 110, 190, 80, 30); ctx.lineWidth = 3; ctx.strokeRect(W - 110, 190, 80, 30);
-  ctx.fillStyle = info.drs ? '#000' : info.drsAvail ? '#00e05a' : '#444'; ctx.textAlign = 'center'; ctx.font = 'bold 22px "Titillium Web", Arial, sans-serif';
-  ctx.fillText('DRS', W - 70, 206);
+  ctx.fillStyle = '#e9edf3'; ctx.font = F(700, 64); ctx.fillText(String(info.speed), 616 * k, 112 * k);
+  ctx.fillStyle = '#8b95a8'; ctx.font = F(700, 20); ctx.fillText('KM/H', 616 * k, 152 * k);
+  ctx.fillText('BBAL', 520 * k, 200 * k); ctx.fillStyle = '#ffd200'; ctx.font = F(700, 28); ctx.fillText(info.bias.toFixed ? info.bias.toFixed(1) : info.bias, 616 * k, 200 * k);
+  ctx.fillStyle = '#8b95a8'; ctx.font = F(700, 20); ctx.fillText('TYRE', 520 * k, 236 * k);
+  ctx.fillStyle = info.tyre < 50 ? '#ff3b3b' : info.tyre < 70 ? '#ffd200' : '#19e05a'; ctx.font = F(700, 28); ctx.fillText((info.tyre ?? 100) + '%', 616 * k, 236 * k);
+  // bottom: ERS bar + DRS box
+  ctx.fillStyle = '#1a1f2a'; ctx.fillRect(26 * k, 286 * k, 360 * k, 24 * k);
+  const eg = ctx.createLinearGradient(26 * k, 0, 386 * k, 0); eg.addColorStop(0, info.ersOn ? '#00a0ff' : '#c9a100'); eg.addColorStop(1, info.ersOn ? '#3ad1ff' : '#ffd200');
+  ctx.fillStyle = eg; ctx.fillRect(26 * k, 286 * k, 360 * k * Math.max(0, Math.min(1, info.ers)), 24 * k);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#8b95a8'; ctx.font = F(700, 18); ctx.fillText(info.ersOn ? 'OVERTAKE' : 'ERS', 26 * k, 328 * k);
+  ctx.fillStyle = info.drs ? '#19e05a' : '#0b0e14'; ctx.strokeStyle = info.drsAvail || info.drs ? '#19e05a' : '#2c3546';
+  ctx.fillRect(472 * k, 282 * k, 144 * k, 44 * k); ctx.lineWidth = 3 * k; ctx.strokeRect(472 * k, 282 * k, 144 * k, 44 * k);
+  ctx.fillStyle = info.drs ? '#02130a' : info.drsAvail ? '#19e05a' : '#3a4558'; ctx.textAlign = 'center'; ctx.font = F(700, 28); ctx.fillText('DRS', 544 * k, 305 * k);
   d.t.needsUpdate = true;
 }
 
-function buildSteeringWheel(tpl, driverIndex, detailedHands = false) {
+// glove textures: dark knit with a logo along the back of the hand
+const gloveTex = {};
+function gloveBackTexture(team) {
+  if (gloveTex[team.id]) return gloveTex[team.id];
+  const c = document.createElement('canvas'); c.width = 256; c.height = 256;
+  const x = c.getContext('2d');
+  x.fillStyle = '#17181c'; x.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 2600; i++) { x.fillStyle = `rgba(255,255,255,${Math.random() * 0.045})`; x.fillRect(Math.random() * 256, Math.random() * 256, 2, 1); }
+  x.fillStyle = team.color === '#FFFFFF' ? '#1e4fb8' : team.color;
+  x.fillRect(0, 0, 34, 256);
+  x.fillStyle = '#f2f2f2'; x.font = '900 italic 40px "Titillium Web", Arial Black, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText((team.livery.logo || team.name).toUpperCase().slice(0, 9), 145, 128, 200);
+  x.strokeStyle = 'rgba(255,255,255,0.12)'; x.setLineDash([4, 4]); x.strokeRect(8, 8, 240, 240);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return (gloveTex[team.id] = t);
+}
+
+function buildSteeringWheel(tpl, driverIndex, detailed = false) {
   const G = steeringGeometry(), M = sharedMats();
   const assembly = new THREE.Group();
-  assembly.position.set(0, 0.675, 0.36);
-  assembly.rotation.x = 0.3;
-  const column = new THREE.Mesh(G.column, M.carbon); column.position.z = 0.14; assembly.add(column);
+  assembly.position.set(0, 0.648, 0.345);
+  assembly.rotation.x = 0.32;
+  const column = new THREE.Mesh(G.column, M.carbon); column.position.z = 0.15; assembly.add(column);
   const spin = new THREE.Group(); assembly.add(spin);
   spin.add(new THREE.Mesh(G.body, M.carbon));
-  const hub = new THREE.Mesh(G.hub, M.metal); hub.position.z = 0.03; spin.add(hub);
+  const hub = new THREE.Mesh(G.hub, M.metal); hub.position.z = 0.026; spin.add(hub);
+  const suede = M.suede || (M.suede = new THREE.MeshStandardMaterial({ color: 0x1b1c1f, roughness: 0.97 }));
+  const grips = [];
   for (const s of [1, -1]) {
-    const g = new THREE.Mesh(G.grip, M.rubber || (M.rubber = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.95 })));
-    g.position.set(s * 0.128, -0.004, 0.004); g.rotation.z = -s * 0.2; spin.add(g);
+    const g = new THREE.Mesh(G.grip, suede);
+    g.position.set(s * 0.12, -0.005, 0.005); g.rotation.z = s * 0.15;
+    spin.add(g); grips.push(g);
   }
   const dash = driverIndex === 'player' ? makeDashCanvas() : null;
   if (!dash && !staticDash) {
-    staticDash = makeDashCanvas();
-    drawDash(staticDash, { rpm: 0.85, gear: '6', speed: 247, ers: 0.7, drs: false, drsAvail: false, ersOn: false, delta: -0.12, lap: 3, pos: 5, bias: 57 });
+    staticDash = makeDashCanvas(320, 180);
+    drawDash(staticDash, { rpm: 0.85, gear: '6', speed: 247, ers: 0.7, drs: false, drsAvail: false, ersOn: false, delta: -0.12, lap: 3, pos: 5, bias: 57.5, last: '1:24.381', tyre: 88 });
   }
+  const bezel = new THREE.Mesh(G.bezel, M.black); bezel.position.set(0, 0.012, FACE_Z - 0.0012); spin.add(bezel);
   const dispMat = new THREE.MeshBasicMaterial({ map: (dash || staticDash).t, toneMapped: false });
-  const display = new THREE.Mesh(G.display, dispMat); display.position.set(0, 0.012, -0.0162); spin.add(display);
-  const btns = {};
-  const layout = [[-0.088, 0.03, 0], [-0.094, 0.0, 4], [-0.088, -0.03, 2], [0.088, 0.03, 3], [0.094, 0.0, 1], [0.088, -0.03, 5]];
-  for (const [x, y, ci] of layout) {
-    const col = BTN_COLORS[ci];
-    const mat = ci === 3 || ci === 4 ? btnMat(col).clone() : btnMat(col);
-    const b = new THREE.Mesh(G.btn, mat); b.position.set(x, y, -0.0165); spin.add(b);
-    if (ci === 3) btns.drs = mat;
-    if (ci === 4) btns.ers = mat;
+  const display = new THREE.Mesh(G.display, dispMat); display.position.set(0, 0.012, FACE_Z - 0.0042); spin.add(display);
+  const btns = {}, paddles = [];
+  if (detailed) {
+    const accent = tpl.team.color === '#FFFFFF' ? '#1e8cff' : tpl.team.color;
+    const face = new THREE.Mesh(G.face, new THREE.MeshStandardMaterial({ map: wheelFaceTexture(accent), transparent: true, depthWrite: false, roughness: 0.5, polygonOffset: true, polygonOffsetFactor: -2 }));
+    face.position.set(0, -0.008, FACE_Z - 0.0002); spin.add(face);
+    for (const [x, y, col, id] of BUTTONS) {
+      const mat = id ? btnMat(col).clone() : btnMat(col);
+      const b = new THREE.Mesh(G.btn, mat); b.position.set(x, y, FACE_Z - 0.0024); spin.add(b);
+      const r = new THREE.Mesh(G.btnRing, M.metal); r.position.set(x, y, FACE_Z - 0.0006); spin.add(r);
+      if (id) btns[id] = { mesh: b, mat, z: b.position.z, x, y };
+    }
+    ROTARIES.forEach(([x, y, r, col], k) => {
+      const kn = new THREE.Mesh(G.knob, new THREE.MeshStandardMaterial({ color: col, roughness: 0.35, metalness: col === '#16171a' ? 0.6 : 0.1 }));
+      kn.scale.set(r, r, r < 0.007 ? 0.008 : 0.012); kn.position.set(x, y, FACE_Z - (r < 0.007 ? 0.004 : 0.006)); kn.rotation.z = (k * 1.3) % 3 - 1.2; spin.add(kn);
+      const mk = new THREE.Mesh(G.marker, btnMat(col === '#16171a' ? '#ffffff' : '#111111'));
+      mk.scale.setScalar(r / 0.0108); mk.position.set(0, 0.62, -0.52); kn.add(mk);
+    });
+    for (const s of [1, -1]) {
+      const pv = new THREE.Group(); pv.position.set(s * 0.05, 0.02, 0.019);
+      const p = new THREE.Mesh(G.paddle, M.carbon); p.scale.x = s; pv.add(p);
+      spin.add(pv); paddles.push(pv);
+      const cl = new THREE.Mesh(G.clutch, M.carbon); cl.scale.x = s; cl.position.set(s * 0.045, -0.032, 0.02); spin.add(cl);
+    }
+  } else {
+    for (const s of [1, -1]) { const pv = new THREE.Group(); pv.position.set(s * 0.05, 0.02, 0.019); spin.add(pv); paddles.push(pv); }
   }
-  for (let k = 0; k < 4; k++) {
-    const kn = new THREE.Mesh(G.knob, M.metal); kn.position.set(-0.045 + k * 0.03, -0.044, -0.017); kn.rotation.z = k * 0.7; spin.add(kn);
-    const mk = new THREE.Mesh(G.marker, btnMat('#ffffff')); mk.position.set(0, 0.006, -0.0075); kn.add(mk);
-  }
-  const paddles = [];
-  for (const s of [1, -1]) {
-    const pv = new THREE.Group(); pv.position.set(s * 0.06, 0.005, 0.022);
-    const p = new THREE.Mesh(G.paddle, M.carbon); p.scale.x = s; pv.add(p);
-    spin.add(pv); paddles.push(pv);
-  }
-  // driver's hands
   const hands = [];
   for (const s of [1, -1]) {
-    const frame = new THREE.Group();
-    frame.position.set(s * 0.128, -0.004, 0.004);
-    frame.rotation.z = -s * 0.2;
-    spin.add(frame);
-    if (!detailedHands) {
-      const gl = new THREE.Mesh(G.glove, tpl.gloveMat); gl.position.set(s * 0.004, 0, -0.01); frame.add(gl);
+    if (!detailed) {
+      const frame = new THREE.Group(); frame.position.set(s * 0.128, -0.004, 0.004); frame.rotation.z = s * 0.15; spin.add(frame);
+      const gl = new THREE.Mesh(G.glove, tpl.gloveMat); gl.position.set(s * 0.006, 0, -0.008); frame.add(gl);
       hands.push({ s, frame, simple: true });
       continue;
     }
-    hands.push(buildHand(s, frame, tpl));
+    hands.push(buildHand(s, spin, tpl));
   }
   return { assembly, spin, paddles, btns, dash, display, hands };
 }
 
-// Gloved hand: four curled fingers wrapped around the grip, palm on the outside, thumb on the wheel face.
+// ---------- driver's gloved hands ----------
+// Built for the left hand in the grip frame (grip axis = +y, outward = +x, driver side = -z) and mirrored for the right.
+// Fingers wrap the grip analytically (each joint lands on the grip circle), the thumb reaches buttons with 2-bone IK.
+const FINGERS = [[0.031, [0.043, 0.026, 0.021]], [0.0105, [0.047, 0.028, 0.022]], [-0.0095, [0.044, 0.026, 0.021]], [-0.0285, [0.035, 0.021, 0.018]]];
+const GRIP_C = new THREE.Vector2(-0.037, 0.002); // grip axis in hand-frame (x, z)
 let handGeo = null;
-function buildHand(s, frame, tpl) {
-  if (!handGeo) {
-    const finger = new THREE.TorusGeometry(0.0318, 0.0102, 8, 16, 4.0);
-    finger.rotateX(Math.PI / 2); // wrap around the vertical grip axis
-    const tip = new THREE.SphereGeometry(0.0104, 8, 6);
-    handGeo = {
-      finger, tip,
-      palm: (() => { const g = new THREE.CapsuleGeometry(0.03, 0.04, 4, 12); g.scale(0.62, 1, 1.15); return g; })(),
-      back: (() => { const g = new THREE.BoxGeometry(0.012, 0.05, 0.05); return g; })(),
-      cuff: (() => { const g = new THREE.CylinderGeometry(0.035, 0.032, 0.07, 14); g.rotateX(Math.PI / 2 - 0.55); return g; })(),
-      thumb: (() => { const g = new THREE.CapsuleGeometry(0.0105, 0.034, 4, 8); g.rotateZ(Math.PI / 2); g.translate(-0.022, 0, 0); return g; })(),
-    };
-  }
-  const glove = tpl.gloveMat2 || (tpl.gloveMat2 = new THREE.MeshStandardMaterial({ color: 0x1e1f24, roughness: 0.85, side: THREE.DoubleSide }));
-  const accent = tpl.gloveAccent || (tpl.gloveAccent = new THREE.MeshStandardMaterial({ color: tpl.team.color === '#FFFFFF' ? '#0A2E6E' : tpl.team.color, roughness: 0.7 }));
-  const palm = new THREE.Mesh(handGeo.palm, glove); palm.position.set(s * 0.036, 0, -0.002); frame.add(palm);
-  const strap = new THREE.Mesh(handGeo.back, accent); strap.position.set(s * 0.054, -0.012, -0.004); frame.add(strap);
-  const cuff = new THREE.Mesh(handGeo.cuff, accent); cuff.position.set(s * 0.042, -0.04, -0.05); frame.add(cuff);
-  const wrist = new THREE.Object3D(); wrist.position.set(s * 0.03, -0.06, -0.075); frame.add(wrist);
-  const fingers = [];
-  [0.026, 0.006, -0.014, -0.032].forEach((y, fi) => {
-    const f = new THREE.Group();
-    f.position.set(0, y, 0.002);
-    if (s < 0) f.scale.x = -1; // mirror for the right hand
-    const ring = new THREE.Mesh(handGeo.finger, glove);
-    f.add(ring);
-    const t = new THREE.Mesh(handGeo.tip, glove);
-    t.position.set(Math.cos(4.0) * 0.0318, 0, Math.sin(4.0) * 0.0318);
-    f.add(t);
-    if (fi === 3) f.scale.multiplyScalar(0.92);
-    frame.add(f);
-    fingers.push(f);
+function handGeometries() {
+  if (handGeo) return handGeo;
+  const cap = (r, len) => { const g = new THREE.CapsuleGeometry(r, Math.max(0.001, len - r * 1.2), 4, 10); g.rotateX(Math.PI / 2); g.translate(0, 0, len / 2); return g; };
+  const bone = (r, len) => { const g = new THREE.CapsuleGeometry(r, Math.max(0.001, len - r * 1.1), 4, 10); g.translate(0, -len / 2, 0); return g; };
+  handGeo = {
+    palm: roundBox(0.027, 0.084, 0.09, 0.011),
+    fingers: FINGERS.map(([, L], fi) => L.map((l, k) => cap([0.0104, 0.0097, 0.0091][k] * (fi === 3 ? 0.92 : 1), l))),
+    thumb1: bone(0.0118, 0.036), thumb2: bone(0.011, 0.031),
+    thenar: (() => { const g = new THREE.SphereGeometry(0.019, 12, 10); g.scale(0.85, 1.25, 1.35); return g; })(),
+    cuff: (() => { const g = new THREE.CylinderGeometry(0.033, 0.0375, 0.055, 18, 1, true); g.rotateX(Math.PI / 2); return g; })(),
+    strap: (() => { const g = new THREE.CylinderGeometry(0.0352, 0.0352, 0.012, 18, 1, true); g.rotateX(Math.PI / 2); return g; })(),
+  };
+  return handGeo;
+}
+const _hm = new THREE.Matrix4(), _hv = new THREE.Vector3(), _hp = new THREE.Vector3();
+function buildHand(s, spin, tpl) {
+  const HG = handGeometries();
+  const glove = tpl.gloveFabric || (tpl.gloveFabric = new THREE.MeshStandardMaterial({ color: 0x1b1c20, roughness: 0.88 }));
+  const back = tpl.gloveBack || (tpl.gloveBack = new THREE.MeshStandardMaterial({ map: gloveBackTexture(tpl.team), roughness: 0.82 }));
+  const accent = tpl.gloveAccent || (tpl.gloveAccent = new THREE.MeshStandardMaterial({ color: tpl.team.color === '#FFFFFF' ? '#1e4fb8' : tpl.team.color, roughness: 0.7 }));
+  const root = new THREE.Group();
+  root.position.set(s * 0.12, -0.005, 0.005); root.rotation.z = s * 0.15;
+  if (s < 0) root.scale.x = -1;
+  spin.add(root);
+  // hand frame: x = back of the hand (outwards), y = towards the index finger, z = wrist -> knuckles
+  const hz = new THREE.Vector3(0.12, 0.26, 1).normalize(), hy = new THREE.Vector3(0, 1, -0.26).normalize();
+  hy.addScaledVector(hz, -hy.dot(hz)).normalize();
+  const hx = new THREE.Vector3().crossVectors(hy, hz);
+  const frame = new THREE.Group();
+  frame.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(hx, hy, hz));
+  frame.position.copy(hx).multiplyScalar(0.0372).add(new THREE.Vector3(0, -0.004, -0.004));
+  root.add(frame);
+  const add = (geo, mat, parent, x = 0, y = 0, z = 0) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; parent.add(m); return m; };
+  add(HG.palm, [back, glove, glove, glove, glove, glove], frame);
+  add(HG.thenar, glove, frame, -0.006, 0.022, -0.026);
+  add(HG.cuff, glove, frame, 0.002, -0.002, -0.07);
+  add(HG.strap, accent, frame, 0.002, -0.002, -0.052);
+  const fingers = FINGERS.map(([y, L], fi) => {
+    const joints = [];
+    let parent = frame;
+    L.forEach((l, k) => {
+      const j = new THREE.Group();
+      if (k === 0) j.position.set(-0.004, y, 0.043); else j.position.set(0, 0, L[k - 1]);
+      parent.add(j); add(HG.fingers[fi][k], glove, j);
+      joints.push(j); parent = j;
+    });
+    return { joints, L, y };
   });
-  const thumb = new THREE.Group(); thumb.position.set(s * 0.018, 0.024, -0.03); frame.add(thumb);
-  const tm = new THREE.Mesh(handGeo.thumb, glove); if (s < 0) tm.scale.x = -1; thumb.add(tm);
-  const hand = { s, frame, fingers, thumb, wrist };
-  poseHand(hand, 0, 0, 0, 0);
+  const thumbBase = new THREE.Group(); thumbBase.position.set(-0.009, 0.034, -0.024); frame.add(thumbBase);
+  const t1 = new THREE.Group(); thumbBase.add(t1); add(HG.thumb1, glove, t1);
+  const t2 = new THREE.Group(); t2.position.set(0, -0.036, 0); t1.add(t2); add(HG.thumb2, glove, t2);
+  const wrist = new THREE.Object3D(); wrist.position.set(0.002, -0.002, -0.085); frame.add(wrist);
+  // spin space -> thumb base space (static: hand is fixed on the grip)
+  root.updateMatrix(); frame.updateMatrix(); thumbBase.updateMatrix();
+  const toBase = new THREE.Matrix4().multiplyMatrices(root.matrix, frame.matrix).multiply(thumbBase.matrix).invert();
+  const toFrame = new THREE.Matrix4().multiplyMatrices(root.matrix, frame.matrix).invert();
+  const rest = new THREE.Vector3(s * 0.1, 0.043, FACE_Z - 0.009);
+  const pole = new THREE.Vector3(s * 0.5, 0.35, -1).transformDirection(toFrame);
+  const hand = { s, root, frame, fingers, thumb: { base: thumbBase, t1, t2 }, wrist, toBase, rest, pole, target: new THREE.Vector3() };
+  poseHand(hand, 0, 0, null, 0);
   return hand;
 }
 
-// grip: squeeze 0..1, pull: index-finger paddle pull 0..1, press: thumb button press 0..1
-function poseHand(h, grip, pull, press, jitter) {
-  if (h.simple) return;
-  const s = h.s;
-  h.fingers.forEach((f, fi) => {
-    const idx = fi === 0;
-    f.rotation.y = s * (0.15 - grip * 0.08 + (idx ? 0.25 - pull * 0.55 : 0));
-    f.position.z = 0.002 - (idx ? pull * 0.008 : 0);
-  });
-  h.thumb.rotation.z = s * (0.35 - press * 0.15);
-  h.thumb.rotation.y = s * (-0.2 + press * 0.35);
-  h.thumb.position.z = -0.03 + press * 0.005;
-  h.frame.position.y = -0.004 + jitter * (Math.random() - 0.5) * 0.004;
+// finger wrap: chain of chords on a circle around the grip (2D in the hand frame's xz-plane)
+function wrapFinger(f, rw, open) {
+  const K = f.joints[0].position, c = GRIP_C;
+  const kx = K.x - c.x, kz = K.z - c.y, d = Math.hypot(kx, kz), L1 = f.L[0];
+  let ang;
+  if (d >= rw + L1 || d <= Math.abs(rw - L1)) ang = Math.atan2(kz, kx) + 0.6;
+  else {
+    const a = (rw * rw - L1 * L1 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, rw * rw - a * a));
+    const mx = kx * a / d, mz = kz * a / d;
+    const p1 = Math.atan2(mz + kx * h / d, mx - kz * h / d), p2 = Math.atan2(mz - kx * h / d, mx + kz * h / d);
+    const base = Math.atan2(kz, kx), norm = v => { let x = v - base; while (x < 0) x += Math.PI * 2; while (x > Math.PI * 2) x -= Math.PI * 2; return x; };
+    ang = norm(p1) < norm(p2) ? p1 : p2; // first point reached when wrapping away from the palm
+    if (norm(ang) > Math.PI) ang = norm(p1) > norm(p2) ? p1 : p2;
+  }
+  const P = [[K.x, K.z]];
+  let a = ang;
+  P.push([c.x + Math.cos(a) * rw, c.y + Math.sin(a) * rw]);
+  for (let k = 1; k < 3; k++) { a += 2 * Math.asin(Math.min(1, f.L[k] / (2 * rw))); P.push([c.x + Math.cos(a) * rw, c.y + Math.sin(a) * rw]); }
+  let prev = 0;
+  for (let k = 0; k < 3; k++) {
+    const dir = Math.atan2(P[k + 1][0] - P[k][0], P[k + 1][1] - P[k][1]);
+    let rel = dir - prev; rel = Math.atan2(Math.sin(rel), Math.cos(rel));
+    f.joints[k].rotation.y = rel * (1 - open * (k === 0 ? 0.55 : 0.75));
+    prev = dir;
+  }
 }
 
-// two-bone IK arm (upper arm + forearm) from a fixed shoulder to the moving wrist
+// grip 0..1 squeeze, pull 0..1 index/middle reaching for the paddle, target = thumb tip (spin space) or null, press depth 0..1
+function poseHand(h, grip, pull, target, press, bump = 0) {
+  if (h.simple) return;
+  const rw = 0.0342 * (1 - 0.035 * grip);
+  h.fingers.forEach((f, i) => wrapFinger(f, rw * (i === 3 ? 0.98 : 1), i < 2 ? pull : 0));
+  _hp.copy(target || h.rest);
+  _hp.z += press * 0.003;
+  _hv.copy(_hp).applyMatrix4(h.toBase);
+  solveTwoBone(h.thumb.t1, h.thumb.t2, 0.03, _hv, h.pole, -1);
+  h.root.position.y = -0.005 + bump * (Math.random() - 0.5) * 0.003;
+}
+
+// driver's arms: tapered suit sleeves solved with two-bone IK from the shoulders to the glove cuffs
 function buildArms(tpl, body) {
-  const upper = new THREE.CapsuleGeometry(0.036, 0.24, 4, 10);
-  const fore = new THREE.CapsuleGeometry(0.029, 0.23, 4, 10);
+  const upper = new THREE.CylinderGeometry(0.043, 0.039, 1, 16, 1, true);
+  const fore = new THREE.CylinderGeometry(0.039, 0.031, 1, 16, 1, true);
+  const joint = new THREE.SphereGeometry(0.041, 14, 10), shoulder = new THREE.SphereGeometry(0.05, 14, 10);
   const arms = [];
   for (const s of [1, -1]) {
-    const u = new THREE.Mesh(upper, tpl.suitMat), f = new THREE.Mesh(fore, tpl.suitMat);
-    u.castShadow = f.castShadow = true;
-    body.add(u, f);
-    arms.push({ s, u, f, shoulder: new THREE.Vector3(s * 0.175, 0.56, -0.2), a: 0.29, b: 0.285 });
+    const m = (g) => { const o = new THREE.Mesh(g, tpl.suitMat); o.castShadow = true; body.add(o); return o; };
+    const sh = new THREE.Vector3(s * 0.18, 0.54, -0.17);
+    const sm = m(shoulder); sm.position.copy(sh);
+    arms.push({ s, u: m(upper), f: m(fore), e: m(joint), shoulder: sh, a: 0.29, b: 0.27 });
   }
   return arms;
 }
@@ -778,23 +968,23 @@ function placeBone(mesh, a, b) {
   const len = _m.length();
   mesh.position.addVectors(a, b).multiplyScalar(0.5);
   mesh.quaternion.setFromUnitVectors(_up, _m.normalize());
-  const P = mesh.geometry.parameters;
-  mesh.scale.set(1, (len + P.radius * 1.2) / (P.length + P.radius * 2), 1);
+  mesh.scale.set(1, len, 1);
 }
 function solveArm(arm, wristWorld, body) {
   _w.copy(wristWorld); body.worldToLocal(_w);
   const S = arm.shoulder, { a, b } = arm;
   _d.subVectors(_w, S);
-  const dist = Math.min(Math.max(_d.length(), Math.abs(a - b) + 0.01), a + b - 0.001);
+  const dist = Math.min(Math.max(_d.length(), Math.abs(a - b) + 0.01), a + b - 0.002);
   _d.normalize();
   const cosA = (a * a + dist * dist - b * b) / (2 * a * dist);
   const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
-  _p.set(arm.s * 0.3, -0.85, -0.42).normalize();
+  _p.set(arm.s * 0.45, -0.8, -0.35).normalize();
   _p.addScaledVector(_d, -_p.dot(_d)).normalize();
   _e.copy(S).addScaledVector(_d, a * cosA).addScaledVector(_p, a * sinA);
   _v.copy(S).addScaledVector(_d, dist);
   placeBone(arm.u, S, _e);
   placeBone(arm.f, _e, _v);
+  arm.e.position.copy(_e);
 }
 
 export function compoundColor(name) { return COMPOUNDS[name] || COMPOUNDS.soft; }
@@ -890,6 +1080,11 @@ export function buildCar(team, driverIndex = 0, { compound = 'soft', ghost = fal
     wheels.push({ ...w, front });
   }
 
+  if (!ghost) {
+    const sh = new THREE.Mesh(new THREE.PlaneGeometry(2.25, 6.3), sharedMats().contact || (sharedMats().contact = new THREE.MeshBasicMaterial({ alphaMap: contactShadowTexture(), color: 0x000000, transparent: true, opacity: 0.72, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -6 })));
+    sh.rotation.x = -Math.PI / 2; sh.position.set(0, 0.025, -0.12); sh.renderOrder = 1;
+    group.add(sh);
+  }
   if (ghost) {
     group.traverse(o => {
       if (o.isMesh) {
@@ -900,11 +1095,20 @@ export function buildCar(team, driverIndex = 0, { compound = 'soft', ghost = fal
     });
   }
 
-  let blurred = false, wheelAngle = 0, rainT = 0, detailOn = true;
+  let blurred = false, wheelAngle = 0, rainT = 0, detailOn = true, wheelVis = 0;
+  let lastDrs = false, lastOt = false, lastPit = false;
   const paddleT = [0, 0];
-  let drsPressT = 0, lastDrs = false;
-  const tmpW = new THREE.Vector3();
+  const tmpW = new THREE.Vector3(), thumbTgt = new THREE.Vector3();
   let compoundNow = compound;
+  // thumb presses per hand (+1 = left, -1 = right): reach the button, push it in, hold or release, return to rest
+  const thumbs = { 1: { btn: null, t: 0, hold: false }, [-1]: { btn: null, t: 0, hold: false } };
+  const press = (id, hold = false) => {
+    const b = sw.btns[id]; if (!b) return;
+    const th = thumbs[Math.sign(b.x)];
+    if (th.btn === id && hold && th.hold) return;
+    th.btn = id; th.t = 0; th.hold = hold;
+  };
+  const release = id => { for (const k of [1, -1]) { const th = thumbs[k]; if (th.btn === id && th.hold) { th.hold = false; th.t = Math.max(th.t, 0.2); } } };
   const api = {
     group, body, wheels, helmet, flapPivot, driver, team, mirrors, steering: sw,
     setDRS(open) { flap.rotation.x += ((open ? 0.05 : 0.62) - flap.rotation.x) * 0.35; },
@@ -913,7 +1117,8 @@ export function buildCar(team, driverIndex = 0, { compound = 'soft', ghost = fal
       detailOn = on; detail.visible = on;
       for (const w of wheels) w.disc.visible = on;
     },
-    paddle(up) { paddleT[up ? 1 : 0] = 0.14; },
+    paddle(up) { paddleT[up ? 1 : 0] = 0.18; },
+    press(id) { press(id); },
     drawDash(info) { if (sw.dash) drawDash(sw.dash, info); },
     update(dt, s) {
       wheelAngle += (s.speed / WHEEL_R) * dt;
@@ -933,27 +1138,45 @@ export function buildCar(team, driverIndex = 0, { compound = 'soft', ghost = fal
       rainT += dt;
       rainMat.emissiveIntensity = s.rainBlink ? (Math.sin(rainT * 25) > 0 ? 6 : 0.2) : 0.2;
       if (detailOn) {
-        // steering wheel turns with the front wheels; paddles flick on shifts
-        sw.spin.rotation.z = -(s.wheel !== undefined ? s.wheel : Math.max(-1.9, Math.min(1.9, s.steer * 5.5)));
+        // steering wheel follows the front wheels through a light spring (no twitching); paddles are pulled by the fingers
+        const want = s.wheel !== undefined ? s.wheel : Math.max(-1.9, Math.min(1.9, s.steer * 5.5));
+        wheelVis += (want - wheelVis) * (detailed ? 1 - Math.exp(-dt * 22) : 1);
+        sw.spin.rotation.z = -wheelVis;
+        const reachP = [0, 0];
         for (let k = 0; k < 2; k++) {
           paddleT[k] = Math.max(0, paddleT[k] - dt);
+          const e = 0.18 - paddleT[k], on = paddleT[k] > 0;
+          reachP[k] = on ? smooth(0, 0.05, e) * (1 - smooth(0.1, 0.18, e)) : 0;
           const side = k === 1 ? -1 : 1; // upshift = right paddle (driver's right is -x)
-          sw.paddles[k].rotation.y = side * (paddleT[k] > 0 ? 0.35 : 0);
+          sw.paddles[k].rotation.y = side * 0.3 * (on ? smooth(0.04, 0.08, e) * (1 - smooth(0.11, 0.18, e)) : 0);
         }
-        if (sw.btns.drs) sw.btns.drs.emissiveIntensity = s.drs ? 3 : 0.15;
-        if (sw.btns.ers) sw.btns.ers.emissiveIntensity = s.ers ? 3 : 0.15;
         if (detailed) {
-          if (s.drs !== lastDrs) { drsPressT = 0.22; lastDrs = s.drs; }
-          drsPressT = Math.max(0, drsPressT - dt);
-          const grip = Math.min(1, (s.brake || 0) * 0.8 + Math.abs(s.wheel || 0) * 0.2);
+          if (s.drs !== lastDrs) { lastDrs = s.drs; press('drs'); }
+          if (!!s.ers !== lastOt) { lastOt = !!s.ers; if (lastOt) press('ot', true); else release('ot'); }
+          if (!!s.limiter !== lastPit) { lastPit = !!s.limiter; press('pit'); }
+          const grip = Math.min(1, (s.brake || 0) * 0.7 + Math.abs(wheelVis) * 0.25);
           const bump = s.bump || 0;
           for (const h of sw.hands) {
-            const left = h.s === 1;
-            const pull = Math.min(1, paddleT[left ? 0 : 1] / 0.07);
-            const press = left ? Math.min(1, drsPressT / 0.1) : (s.ers ? 1 : 0);
-            poseHand(h, grip, pull, press, bump);
+            const th = thumbs[h.s];
+            let target = null, depth = 0;
+            if (th.btn) {
+              th.t += dt;
+              const t = th.t, b = sw.btns[th.btn];
+              const reach = th.hold ? smooth(0, 0.09, t) : t < 0.2 ? smooth(0, 0.09, t) : 1 - smooth(0.2, 0.34, t);
+              depth = th.hold ? smooth(0.08, 0.13, t) : smooth(0.09, 0.125, t) * (1 - smooth(0.17, 0.22, t));
+              thumbTgt.set(b.x, b.y, FACE_Z - 0.0158).lerp(h.rest, 1 - reach);
+              target = thumbTgt;
+              b.mesh.position.z = b.z + depth * 0.0024;
+              if (!th.hold && t > 0.34) th.btn = null;
+            }
+            poseHand(h, grip, reachP[h.s === 1 ? 0 : 1], target, depth, bump);
           }
-          if (bump > 0.3) sw.spin.rotation.z += (Math.random() - 0.5) * 0.03 * bump;
+          const B = sw.btns;
+          if (B.drs) B.drs.mat.emissiveIntensity = s.drs ? 2.6 : 0.12;
+          if (B.ot) B.ot.mat.emissiveIntensity = s.ers ? 2.6 : 0.12;
+          if (B.pit) B.pit.mat.emissiveIntensity = s.limiter ? (Math.floor(rainT * 4) % 2 ? 2.6 : 0.6) : 0.12;
+          if (B.box) B.box.mat.emissiveIntensity = s.box ? 2.2 : 0.12;
+          if (bump > 0.3) sw.spin.rotation.z += (Math.random() - 0.5) * 0.02 * bump;
           group.updateMatrixWorld(true);
           for (const a of arms) {
             const h = sw.hands.find(x => x.s === a.s);

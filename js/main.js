@@ -11,7 +11,8 @@ import { TRACKS } from './tracks.js';
 import { TEAMS } from './teams.js';
 import { Track, KERB_W } from './track.js';
 import { buildScenery, gridSlot } from './scenery.js';
-import { buildCar, FRONT_AXLE, REAR_AXLE } from './car.js';
+import { buildCar, FRONT_AXLE, REAR_AXLE, setTyreWetness } from './car.js';
+import { MarshalPosts } from './marshals.js';
 import { CarPhysics, makeSpec, collideWalls, collideCars } from './physics.js';
 import { AIDriver } from './ai.js';
 import { Input } from './input.js';
@@ -37,7 +38,13 @@ if (isMobile) document.body.classList.add('mobile');
 const DEFAULTS = { mode: 'race', track: 'it-1922', team: 'mclaren', driver: 0, laps: 0, diff: 0.91, field: isMobile ? 10 : 20, grid: 'mid', tyre: 'soft', tc: true, abs: true, gear: true, steer: true, line: true, quality: isMobile ? 'low' : 'medium', cam: 0, blur: !isMobile, vol: 0.7, touch: 'buttons', tiltInvert: false, standings: true, cond: 'day', mpName: '', radio: true, handling: isMobile ? 'easy' : 'medium' };
 const settings = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('f1gp.settings') || '{}'));
 const saveSettings = () => localStorage.setItem('f1gp.settings', JSON.stringify(settings));
-const TYRE_GRIP = { supersoft: 1.025, soft: 1.0, medium: 0.98, hard: 0.96 };
+const TYRE_GRIP = { supersoft: 1.025, soft: 1.0, medium: 0.98, hard: 0.96, inter: 1, wet: 1 };
+// grip of each compound on a track with wetness w (0 dry .. 1 soaked): slicks fade fast, inters rule the damp, wets the downpour
+const tyreWeather = (c, w) => c === 'inter' ? 0.87 + 0.09 * Math.min(1, w / 0.5) - 0.07 * Math.max(0, (w - 0.6) / 0.4) : c === 'wet' ? 0.78 + 0.14 * w : 1 - 0.32 * w;
+const wantTyre = w => w > 0.72 ? 'wet' : w > 0.28 ? 'inter' : null;
+const tyreClass = c => c === 'inter' || c === 'wet' ? c : null;
+const TYRE_COL = { supersoft: '#a0168c', soft: '#e8202a', medium: '#ffd200', hard: '#f0f0f0', inter: '#3fb02a', wet: '#1f6fd6' };
+const TYRE_NAME = { inter: 'INTERMEDIATES', wet: 'FULL WETS', medium: 'SLICKS' };
 
 // ---------------------------------------------------------------- renderer
 const canvas = $('c');
@@ -119,6 +126,7 @@ function setupComposer() {
   blurPass.enabled = q !== 'low' || settings.blur;
   composer.addPass(blurPass);
   composer.addPass(new OutputPass());
+  applyBloom();
   renderer.shadowMap.enabled = true;
   if (sun) { const s = q === 'high' ? 4096 : q === 'medium' ? 2048 : 1024; if (sun.shadow.mapSize.x !== s) { sun.shadow.mapSize.set(s, s); if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; } } }
 }
@@ -197,7 +205,13 @@ let showLine = settings.line;
 let weather = null, envCond = null;
 // online race context (null in single player): { lobby, grid, hostId, mySlot, settings, sendT }
 let mp = null, online = null;
-let radio = null, engineer = null;
+let radio = null, engineer = null, marshalPosts = null;
+// night races: lamps and backlit boards bloom more
+function applyBloom() {
+  if (!bloomPass) return;
+  const night = envCond === 'night' && state === 'race';
+  bloomPass.strength = night ? 0.6 : 0.22; bloomPass.radius = night ? 0.55 : 0.5; bloomPass.threshold = night ? 0.8 : 0.92;
+}
 
 const sleep = () => new Promise(r => { let done = false; const go = () => { if (!done) { done = true; setTimeout(r, 0); } }; requestAnimationFrame(go); setTimeout(go, 60); });
 function setLoading(text, pct) { $('load-text').textContent = text; $('load-fill').style.width = pct + '%'; }
@@ -235,6 +249,7 @@ async function loadEvent() {
     weather = new Weather({ scene, track, sky, sun, hemi, renderer, quality: settings.quality, condition: cond, scenery });
     weather.onThunder = dist => { if (state === 'race' && !paused) audio.thunder(dist); };
     envCond = cond;
+    marshalPosts = new MarshalPosts(scene, track, settings.quality);
     effects = new Effects(scene);
     effects.setScale(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
     weather.setScale(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
@@ -256,6 +271,7 @@ async function loadEvent() {
   document.body.classList.toggle('mp', !!mp);
   document.body.classList.toggle('mp-host', !!mp && mp.hostId === online.net.id);
   state = 'race'; paused = false;
+  applyBloom();
   applyStandings(false);
   if (isMobile && !localStorage.getItem('f1gp.guideSeen') && !mp) showGuide(true);
   checkOrientation();
@@ -306,8 +322,7 @@ function makeCar(team, di, isPlayer, compound) {
   // online "equal cars": no garage upgrades and no EASY grip bonus, so the race is fair
   const fair = mp && mp.settings.equal;
   if (isPlayer && !fair) { progress.applyTo(spec); spec.mu *= (HANDLING[settings.handling] || HANDLING.medium).grip; }
-  spec.mu *= weather ? weather.gripMul : 1; // wet track: less grip for everyone (AI brakes earlier too)
-  const phys = new CarPhysics(spec);
+  const phys = new CarPhysics(spec); // wet-track grip is applied every frame per compound (tyreWeather)
   const model = buildCar(team, di, { compound, player: isPlayer });
   scene.add(model.group);
   if (isPlayer && settings.quality !== 'low') model.mirrors.forEach(m => { m.material = mirror.mat; });
@@ -339,7 +354,7 @@ function setupOnlineGrid() {
     c.slot = g.slot; c.netId = g.id; c.human = g.id != null;
     c.name = g.name || team.drivers[g.driver].name;
     c.tag = c.human ? (g.name || 'PLAYER').slice(0, 12).toUpperCase() : team.drivers[g.driver].code;
-    if (mine) { c.ai = new AIDriver(c, track, 0.9); mp.mySlot = g.slot; }
+    if (mine) { c.ai = new AIDriver(c, track, 0.9, { mistakes: false }); mp.mySlot = g.slot; }
     else if (!c.human) c.ai = new AIDriver(c, track, Math.min(0.995, mp.settings.aiDiff * (0.965 + 0.035 * (team.drivers[g.driver].rating - 0.95) / 0.05)));
     if (!mine) { c.remote = makeRemote(); c.isRemote = !c.ai || online.net.id !== mp.hostId; }
     if (c.human && !mine) { c.nameTag = makeNameTag(c.tag, team.color); c.model.group.add(c.nameTag); }
@@ -357,7 +372,8 @@ function setupRace(meta) {
   const pTeam = TEAMS.find(t => t.id === settings.team);
   race = {
     mode, laps, time: 0, startTime: 0, started: false, lightsOn: false, phase: mp ? 'wait' : 'grid', phaseT: 0, lightsCount: 0, holdT: 0,
-    cars: [], player: null, finishCount: 0, fastest: null, bestSectors: [null, null, null], respawn: car => respawnCar(car),
+    cars: [], player: null, finishCount: 0, fastest: null, bestSectors: [null, null, null], respawn: car => respawnCar(car), retire: car => retireCar(car),
+    crashOuts: 0, aiCrews: [],
     resultsShown: false, playerFinishedAt: 0, ghost: null, ghostRec: [], ghostCar: null, bestTT: Number(localStorage.getItem('f1gp.tt.' + meta.id)) || null,
     bestLapCp: null, msgs: [], online: !!mp,
   };
@@ -366,7 +382,7 @@ function setupRace(meta) {
   } else {
   const player = makeCar(pTeam, settings.driver, true, settings.tyre);
   race.player = player;
-  player.ai = new AIDriver(player, track, 0.9);
+  player.ai = new AIDriver(player, track, 0.9, { mistakes: false });
   // single player: use the online name if one was set
   player.name = settings.mpName || null;
 
@@ -383,7 +399,7 @@ function setupRace(meta) {
       pool = pick;
     }
     const order = pool.map(([t, i]) => {
-      const c = makeCar(t, i, false, Math.random() < 0.6 ? 'soft' : 'medium');
+      const c = makeCar(t, i, false, envCond === 'rain' ? (Math.random() < 0.8 ? 'wet' : 'inter') : Math.random() < 0.6 ? 'soft' : 'medium');
       const skill = settings.diff * (0.965 + 0.035 * (t.drivers[i].rating - 0.95) / 0.05);
       c.ai = new AIDriver(c, track, Math.min(0.995, skill));
       return c;
@@ -400,7 +416,10 @@ function setupRace(meta) {
   }
   }
   const player = race.player;
-  race.cars.forEach((c, k) => { c.pos = k + 1; c.lapStart = 0; });
+  // AI strategy: each driver boxes once their tyres reach their own wear threshold (like the player's engineer call)
+  race.cars.forEach((c, k) => { c.pos = k + 1; c.lapStart = 0; c.stops = 0; c.pitWear = 0.32 + Math.random() * 0.18; c.wxDelay = 2 + Math.random() * 14; });
+  const lvl = Math.max(0, Math.min(1, ((mp ? mp.settings.aiDiff : settings.diff) - 0.84) / 0.145));
+  race.maxCrashOuts = mp ? 0 : Math.round((race.cars.length / 20) * (3 - 2 * lvl));
   for (let k = 0; k < 3; k++) $('sec' + k).className = '';
   race.gridPos = race.cars.indexOf(player) + 1;
   race.event = null; race.crew = null; race.pitRequested = false; race.reward = null; race.pitStops = 0;
@@ -446,7 +465,16 @@ function respawnCar(car) {
   car.phys.ers = Math.max(car.phys.ers, 1e6);
   track.project(pt.x, pt.z, pt.i, car.proj);
   car.lastS = car.proj.s;
-  if (car.isPlayer) { showMsg('CAR RESET', 'small', 1.5); car.invalid = true; }
+}
+
+// an AI car crashed out: it stays where it stopped (off the racing line) and is classified DNF
+function retireCar(car) {
+  if (car.retired || car.isPlayer) return;
+  car.retired = true; car.dnf = true; car.drsOpen = false;
+  car.phys.u = car.phys.w = car.phys.r = 0; car.phys.throttle = 0; car.phys.rpm = 0;
+  if (car.row) car.row.classList.add('out');
+  showMsg(`${car.driver.code} IS OUT OF THE RACE`, 'small', 2.5);
+  marshalPosts?.incident(car.phys.x, car.phys.z, 25);
 }
 
 // ---------------------------------------------------------------- simulation
@@ -481,15 +509,28 @@ function playerControls(inp, dt) {
   }
   const u = Math.abs(p.u);
   const hd = HANDLING[settings.handling] || HANDLING.medium;
-  const assist = settings.steer || settings.handling === 'easy';
+  const easy = settings.handling === 'easy';
+  const assist = settings.steer || easy;
   const maxSteer = (assist ? 0.34 / (1 + Math.pow(u / 26, 1.5)) + 0.022 : 0.38 / (1 + u / 50)) * hd.steerBoost;
   let steer = inp.steer * maxSteer;
   if (assist && Math.abs(p.slipR) > 0.085 && u > 8) steer += (p.slipR - Math.sign(p.slipR) * 0.085) * 0.8 * hd.counter;
-  if (settings.handling === 'easy' && Math.abs(p.slipR) > 0.12) p.r *= Math.exp(-dt * 2.5); // stability control
   c.steerAngle = Math.max(-0.4, Math.min(0.4, steer));
   c.throttle = inp.throttle; c.brake = inp.brake;
-  c.ers = inp.ers; c.tc = settings.tc; c.abs = settings.abs; c.autoGear = settings.gear;
+  c.ers = inp.ers; c.tc = settings.tc || easy; c.abs = settings.abs || easy; c.autoGear = settings.gear;
+  c.easy = easy;
   c.shiftUp = inp.shiftUp; c.shiftDown = inp.shiftDown;
+  // EASY braking assist: if the car arrives at a corner much too fast it lifts and brakes for you
+  if (easy && race.started && !race.inPitLane && u > 12) {
+    const prof = race.playerProfile || (race.playerProfile = track.speedProfile(p.spec, 0.97));
+    const i = race.player.proj.i;
+    let vt = Infinity;
+    for (let k = 1; k <= 6; k++) vt = Math.min(vt, prof[(i + k * 2) % track.n]);
+    const over = p.u - (vt * 1.04 + 1.5);
+    if (over > 0) {
+      const b = Math.min(0.9, over * 0.12 + 0.15);
+      if (b > c.brake) { c.brake = b; c.throttle = Math.min(c.throttle, 0.05); }
+    }
+  }
   if (race.inPitLane) { // 80 km/h pit limiter
     if (p.u > 22.2) { c.throttle = 0; c.brake = Math.max(c.brake, Math.min(1, (p.u - 22.2) * 0.35)); }
     else if (p.u > 21) c.throttle = Math.min(c.throttle, 0.25);
@@ -559,18 +600,31 @@ function stepRace(dt, inp) {
   // changing weather: rain races dry out late on, some day races get a shower after the forecast call
   if (weather && race.mode === 'race' && race.started && Number.isFinite(race.laps)) {
     const frac = Math.max(0, pl.totalDist) / (race.laps * L);
-    if (envCond === 'rain' && race.laps >= 3 && frac > 0.55) { weather.setWetness(Math.max(0.35, 1 - (frac - 0.55) * 2)); engineer?.onWeather('drying'); }
+    if (envCond === 'rain' && race.laps >= 3 && frac > 0.5) { weather.setWetness(Math.max(0.08, 1 - (frac - 0.5) * 1.9)); engineer?.onWeather('drying'); }
     if (race.shower && frac > 0.12) engineer?.onWeather('rainSoon');
     if (race.shower && frac > 0.45) weather.setWetness(Math.min(1, (frac - 0.45) * 3));
-    // grip follows the wetness for everyone (AI slows down in the wet too)
-    const rel = weather.gripNow() / weather.gripBase;
-    for (const c of race.cars) {
-      if (c.isRemote || c.retired) continue;
-      if (!c.isPlayer) c.phys.gripMul = rel;
-      if (c.ai) c.ai.speedScale = Math.sqrt(rel);
+  }
+  // tyre grip follows the track: each compound has its own wet/dry window, worn tyres lose grip too
+  const wet = weather ? weather.wetness : 0;
+  for (const c of race.cars) {
+    if (c.isRemote || c.retired) continue;
+    const tf = tyreWeather(c.compound, wet);
+    const wg = c.isPlayer ? 1 : 1 - 0.1 * Math.pow(c.wear, 1.3);
+    if (!c.isPlayer) c.phys.gripMul = tf * wg;
+    if (c.ai) c.ai.speedScale = Math.sqrt(tf * wg);
+  }
+  pl.phys.gripMul *= tyreWeather(pl.compound, wet);
+  if (Math.abs(wet - (race.lastWet ?? -1)) > 0.02) { race.lastWet = wet; audio.setRain(wet > 0.05); setTyreWetness(wet); }
+  // wrong tyres for the conditions: the engineer calls you in for the right ones
+  if (race.mode === 'race' && race.started && !pl.finished && track.pit && !mp?.settings?.noWeatherCalls) {
+    const want = wantTyre(wet);
+    const wrong = want ? tyreClass(pl.compound) !== want : !!tyreClass(pl.compound);
+    race.wrongTyreT = wrong ? (race.wrongTyreT || 0) + dt : 0;
+    if (race.wrongTyreT > 5 && !race.pitRequested && !race.crew && race.laps - Math.floor(pl.totalDist / L) >= 1) {
+      race.wxCall = want || 'medium'; race.wrongTyreT = -25;
+      togglePitRequest(true);
+      showMsg(`BOX FOR ${TYRE_NAME[race.wxCall]}`, 'red', 3);
     }
-    pl.phys.gripMul *= rel;
-    if (Math.abs(rel - (race.lastRel ?? 1)) > 0.03) { race.lastRel = rel; audio.setRain(weather.wetness > 0.05); }
   }
 
   // physics substeps
@@ -806,7 +860,9 @@ function mpEnd(msg) {
 // ---------------------------------------------------------------- events: marshal rescue, pit stops, tyre wear, coins
 const evCam = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50 };
 let helpClicked = false, boxClicked = false;
-const WEAR_RATE = { supersoft: 1.5, soft: 1.15, medium: 0.85, hard: 0.65 };
+const WEAR_RATE = { supersoft: 1.5, soft: 1.15, medium: 0.85, hard: 0.65, inter: 1.0, wet: 0.9 };
+// rain tyres overheat and wear quickly on a drying track
+const wearMul = (c, w) => (WEAR_RATE[c] || 1) * (c === 'wet' ? 1 + 2.5 * Math.max(0, 0.6 - w) : c === 'inter' ? 1 + 2 * Math.max(0, 0.25 - w) : 1);
 
 function awardCoins(n, why) {
   progress.add(n);
@@ -828,7 +884,8 @@ function updateBoxUI() {
 function togglePitRequest(fromTeam) {
   if (!race || !race.started || race.player.finished || !track.pit) return;
   race.pitRequested = !race.pitRequested;
-  if (!race.pitRequested) race.hardCall = false;
+  if (!race.pitRequested) { race.hardCall = false; race.wxCall = null; }
+  race.player.model.press?.('box');
   updateBoxUI();
   const side = track.pit.side === 1 ? 'LEFT' : 'RIGHT';
   const tyre = race.hardCall ? ' · HARD TYRES' : '';
@@ -846,6 +903,8 @@ function endEvent() {
   if (!race) return;
   if (race.event) { race.event.finish && race.event.finish(); race.event = null; }
   if (race.crew) { race.crew.dispose(); race.crew = null; }
+  for (const c of race.aiCrews || []) { c.crew?.dispose(); c.crew = null; }
+  race.aiCrews = [];
   if (race.player) { race.player.frozen = false; race.player.visual = null; }
   if (race.pitMarker) { scene.remove(race.pitMarker.group); race.pitMarker = null; }
   setFade(false);
@@ -892,8 +951,9 @@ function updatePits(dt) {
   const want = race.started && !pl.finished && (race.pitRequested || inCorr);
   if (want && !race.crew) {
     race.crew = new PitStop({ scene, car: pl, box: race.pitBox, onMessage: showMsg });
-    // the team called for hard tyres
-    if (race.hardCall) race.crew.compound = 'hard';
+    // the team called for hard tyres / the right tyres for the weather
+    if (race.wxCall) race.crew.compound = race.wxCall;
+    else if (race.hardCall) race.crew.compound = tyreClass(pl.compound) ? pl.compound : 'hard';
     race.crewPaid = false;
   }
   if (!want && race.crew && race.crew.state !== 'service') { race.crew.dispose(); race.crew = null; }
@@ -924,7 +984,7 @@ function updatePits(dt) {
       p.spec.mu *= (TYRE_GRIP[crew.compound] || 1) / (TYRE_GRIP[pl.compound] || 1);
       pl.compound = crew.compound;
     }
-    race.hardCall = false; race.pitStopped = true;
+    race.hardCall = false; race.wxCall = null; race.pitStopped = true;
     engineer?.onPitStop();
     race.pitRequested = false; updateBoxUI();
     race.pitStops = (race.pitStops || 0) + 1;
@@ -933,13 +993,78 @@ function updatePits(dt) {
   }
 }
 
+// AI pit stops: each car boxes when its own tyres are worn (at least one lap to go), drives the pit lane at the
+// limiter, stops in its team's box and gets a fresh compound. The crew is only spawned when it could be seen.
+const NEXT_TYRE = { supersoft: ['medium', 'soft'], soft: ['medium', 'hard'], medium: ['hard', 'soft'], hard: ['medium', 'soft'] };
+const pickTyre = c => wantTyre(weather ? weather.wetness : 0) || (tyreClass(c.compound) ? (Math.random() < 0.6 ? 'medium' : 'soft') : (NEXT_TYRE[c.compound] || NEXT_TYRE.soft)[Math.random() < 0.6 ? 0 : 1]);
+function aiBox(c) {
+  const P = track.pit, b = P.boxes[(TEAMS.indexOf(c.team) * 2 + c.di) % P.boxes.length];
+  const pt = track.pointAt(b.s, b.d);
+  return { s: b.s, d: b.d, x: pt.x, y: pt.y, z: pt.z, heading: pt.heading, side: P.side };
+}
+function updateAIPits(dt) {
+  const P = track.pit;
+  if (!P || !P.boxes.length || race.mode !== 'race' || !Number.isFinite(race.laps)) return;
+  const L = track.length;
+  const maxCrews = settings.quality === 'low' ? 0 : settings.quality === 'medium' ? 3 : 5;
+  for (const c of race.cars) {
+    if (c.isPlayer || c.isRemote || c.retired || !c.ai) continue;
+    const ai = c.ai;
+    const want = wantTyre(weather ? weather.wetness : 0), wrong = want ? tyreClass(c.compound) !== want : !!tyreClass(c.compound);
+    c.wxT = wrong ? (c.wxT || 0) + dt : 0;
+    if (!ai.pit && race.started && !c.finished && !ai.retiring && ((race.laps >= 3 && c.stops < 2 && c.wear >= c.pitWear) || (race.laps >= 2 && c.wxT > c.wxDelay))) {
+      if (race.laps - (Math.floor(c.totalDist / L) + 1) >= 1) ai.planPit(aiBox(c));
+    }
+    const pp = ai.pit;
+    if (!pp) continue;
+    if (!c.crew && !pp.done && (pp.state === 'in' || pp.state === 'stopped') && race.aiCrews.length < maxCrews
+      && camera.position.distanceToSquared(tmpV.set(pp.box.x, pp.box.y, pp.box.z)) < 280 * 280) {
+      c.crew = new PitStop({ scene, car: c, box: pp.box, ai: true });
+      c.crew.compound = pickTyre(c);
+      race.aiCrews.push(c);
+    }
+    if (pp.state === 'stopped' && !pp.busy && !pp.done) {
+      pp.busy = true; c.frozen = true; c.drsOpen = false;
+      pp.newTyre = c.crew ? c.crew.compound : pickTyre(c);
+      if (c.crew) c.crew.service(true);
+      else pp.timer = 2.25 + Math.random() * 0.7 + (Math.random() < 0.06 ? 1 + Math.random() * 2 : 0);
+    }
+    if (pp.busy && (c.crew ? c.crew.state === 'released' : (pp.timer -= dt) <= 0)) {
+      pp.busy = false; pp.done = true; pp.state = 'out';
+      c.frozen = false; c.wear = 0; c.stops++;
+      const q = c.phys; q.u = 0; q.w = 0; q.r = 0; q.gear = 1;
+      if (pp.newTyre && pp.newTyre !== c.compound) {
+        q.spec.mu *= (TYRE_GRIP[pp.newTyre] || 1) / (TYRE_GRIP[c.compound] || 1);
+        c.compound = pp.newTyre; c.model.setCompound(c.compound);
+      }
+      ai.refreshProfile();
+      c.pitWear = 0.5 + Math.random() * 0.2;
+    }
+  }
+  // crews pack up a few seconds after their car has gone
+  for (let k = race.aiCrews.length - 1; k >= 0; k--) {
+    const c = race.aiCrews[k], crew = c.crew;
+    if (crew) crew.update(dt);
+    const gone = !crew || c.retired || (crew.state === 'released' ? crew.t - crew.releasedT > 6 : !c.ai?.pit);
+    if (gone) { crew?.dispose(); c.crew = null; race.aiCrews.splice(k, 1); }
+  }
+}
+
 function updateEvents(dt) {
   const pl = race.player, p = pl.phys;
   if (race.started && !pl.frozen) {
     const slip = Math.min(2, Math.abs(p.slipR) * 8 + p.lock + p.spin);
-    pl.wear = Math.min(1, pl.wear + Math.abs(p.u) * dt * 0.000018 * (WEAR_RATE[pl.compound] || 1) * (p.spec.wearRate || 1) * (1 + slip));
+    pl.wear = Math.min(1, pl.wear + Math.abs(p.u) * dt * 0.000018 * wearMul(pl.compound, weather ? weather.wetness : 0) * (p.spec.wearRate || 1) * (1 + slip));
+  }
+  if (race.started) for (const c of race.cars) {
+    if (c.isPlayer || c.isRemote || c.retired || c.frozen) continue;
+    const q = c.phys, slip = Math.min(2, Math.abs(q.slipR) * 8 + q.lock + q.spin);
+    c.wear = Math.min(1, c.wear + Math.abs(q.u) * dt * 0.000018 * wearMul(c.compound, weather ? weather.wetness : 0) * (1 + slip));
   }
   updatePits(dt);
+  updateAIPits(dt);
+  if (race.event || pl.stuckT > 1) marshalPosts?.incident(p.x, p.z, 3);
+  marshalPosts?.update(dt, camera, race);
   // beached in grass / gravel?
   const offSurf = n => n === 'grass' || n === 'gravel';
   const inCorr = track.inPitCorridor(pl.proj.i, pl.proj.d);
@@ -1033,6 +1158,13 @@ function completeLap(c, lapNow) {
 }
 
 function onWallHit(car, x, z, v) {
+  // a big AI shunt can end their race (single player only, a few per race at most)
+  if (!car.isPlayer && car.ai && !mp && race.started && !car.ai.retiring && !car.ai.pit && v > 16 && race.crashOuts < race.maxCrashOuts
+    && Math.random() < Math.min(0.85, (v - 16) / 14)) {
+    car.ai.retiring = true; race.crashOuts++;
+    showMsg(`CRASH! ${car.driver.code} HITS THE BARRIER`, 'red', 2.4);
+    marshalPosts?.incident(x, z, 20);
+  }
   if (v > 3 && performance.now() - car.wallHitT > 120) {
     car.wallHitT = performance.now();
     if (car.isPlayer) { audio.impact(v); shake = Math.min(1, v / 20); engineer?.onHit(v); }
@@ -1061,6 +1193,8 @@ function updateCarVisuals(dt) {
       speed: p.u, steer: p.steer, pitch: Math.max(-0.03, Math.min(0.035, -p.axF * 0.0007)), roll: Math.max(-0.04, Math.min(0.04, p.ay * 0.0008)),
       drs: c.drsOpen, rainBlink: p.harvesting && !p.ersDeploying && race.started, locked: p.lock > 0.5, heave: -Math.min(0.02, p.u * p.u * 0.0000025),
       ers: p.ersDeploying, wheel: c.isPlayer ? THREE.MathUtils.clamp(p.steer * 5.5 + input.steer * 0.35, -1.9, 1.9) : undefined,
+      brake: p.brake, bump: c.isPlayer ? bump * Math.min(1, Math.abs(p.u) / 30) : 0,
+      limiter: c.isPlayer && !!race.inPitLane, box: c.isPlayer && !!race.pitRequested,
     });
     if (c.gearSeen !== p.gear) { if (c.gearSeen !== undefined) c.model.paddle(p.gear > c.gearSeen); c.gearSeen = p.gear; }
     // particles near camera
@@ -1111,8 +1245,9 @@ function updateCockpit(dt) {
     }
     pl.model.drawDash({
       rpm: p.rpm / p.spec.revLimit, gear: !race.started ? 'N' : p.u < -0.5 ? 'R' : String(p.gear), speed: Math.round(Math.abs(p.u) * 3.6),
-      ers: p.ers / 4e6, ersOn: p.ersDeploying, drs: pl.drsOpen, drsAvail: pl.drsAllowed, delta,
-      lap: Math.max(1, Math.floor(pl.totalDist / track.length) + 1), pos: pl.pos, bias: Math.round(p.spec.brakeBias * 100),
+      ers: p.ers / (p.spec.ersMax || 4e6), ersOn: p.ersDeploying, drs: pl.drsOpen, drsAvail: pl.drsAllowed, delta,
+      lap: Math.max(1, Math.floor(pl.totalDist / track.length) + 1), pos: pl.pos, bias: (settings.handling === 'easy' ? 66 : p.spec.brakeBias * 100),
+      last: pl.lastLap ? fmt(pl.lastLap) : null, tyre: Math.round((1 - pl.wear) * 100), pit: !!race.inPitLane,
     });
   }
   if (settings.quality === 'low') return;
@@ -1137,6 +1272,8 @@ function updateCamera(dt, inp) {
   let blur = 0, fov = 60;
   camera.near = 0.1;
   const ev = (race.event && race.event.camPose(evCam)) || (race.crew && race.crew.camPose(evCam));
+  const visor = camMode === 3 && !ev && !look;
+  if (visor !== document.body.classList.contains('cockpit-cam')) document.body.classList.toggle('cockpit-cam', visor);
   if (ev) {
     camera.position.lerp(ev.pos, camera.userData.evInit ? Math.min(1, dt * 3) : 1); camera.userData.evInit = true;
     camera.lookAt(ev.look); fov = ev.fov; blur = 0;
@@ -1159,8 +1296,9 @@ function updateCamera(dt, inp) {
     head.x += (THREE.MathUtils.clamp(-p.ay * 0.0011, -0.045, 0.045) - head.x) * k;
     head.z += (THREE.MathUtils.clamp(p.axF * 0.0006, -0.03, 0.02) - head.z) * k;
     head.yaw += (THREE.MathUtils.clamp(p.steer * 1.4, -0.4, 0.4) - head.yaw) * Math.min(1, dt * 4);
-    const off = camMode === 2 ? [0, 1.13, -0.42] : camMode === 3 ? [head.x, 0.815, -0.1 + head.z] : [0, 0.6, 2.0];
-    const pitch = camMode === 2 ? 0.07 : camMode === 3 ? 0.075 : 0.02;
+    // cockpit eye sits low under the halo, behind the wheel, like the driver's own view
+    const off = camMode === 2 ? [0, 1.13, -0.42] : camMode === 3 ? [head.x, 0.8, -0.14 + head.z] : [0, 0.6, 2.0];
+    const pitch = camMode === 2 ? 0.07 : camMode === 3 ? 0.062 : 0.02;
     g.updateMatrixWorld();
     camera.position.set(...off).applyMatrix4(g.matrixWorld);
     camQ.copy(g.quaternion).multiply(flipQ);
@@ -1168,10 +1306,14 @@ function updateCamera(dt, inp) {
     else if (camMode === 3) camQ.multiply(yawQ.setFromAxisAngle(Y_AXIS, head.yaw));
     pitchQ.setFromAxisAngle(new THREE.Vector3(1, 0, 0), -pitch);
     camera.quaternion.copy(camQ).multiply(pitchQ);
-    fov = camMode === 3 ? 72 : 66 + Math.min(8, speed * 0.08);
-    camera.near = camMode === 3 ? 0.03 : 0.1;
+    fov = camMode === 3 ? 70 + Math.min(3, speed * 0.03) : 66 + Math.min(8, speed * 0.08);
+    camera.near = camMode === 3 ? 0.02 : 0.1;
     blur = camMode === 3 ? 0.7 : 1;
-    if (camMode === 3) { const b = (car.sF.bump + car.sR.bump) * 0.5; camera.position.y += (Math.random() - 0.5) * 0.006 * b * Math.min(1, speed / 30); }
+    if (camMode === 3) {
+      // kerb rattle + a fine engine buzz through the chassis
+      const b = (car.sF.bump + car.sR.bump) * 0.5, t = performance.now() / 1000;
+      camera.position.y += (Math.random() - 0.5) * 0.006 * b * Math.min(1, speed / 30) + Math.sin(t * 95) * 0.00025 * (p.rpm / p.spec.revLimit);
+    }
   } else {
     // TV camera: pick nearest camera slightly ahead of the car
     let best = -1, bd = Infinity;
@@ -1269,7 +1411,7 @@ function updateHUD(dt) {
   ef.style.width = (p.ers / (p.spec.ersMax || 4e6) * 100).toFixed(1) + '%';
   $('hud-tyre').textContent = Math.round((1 - pl.wear) * 100) + '%';
   $('hud-tyre').style.color = pl.wear > 0.5 ? '#ff4040' : pl.wear > 0.3 ? '#ffd200' : '#fff';
-  $('tyre-dot').style.background = ({ supersoft: '#a0168c', soft: '#e8202a', medium: '#ffd200', hard: '#f0f0f0' })[pl.compound] || '#e8202a';
+  $('tyre-dot').style.background = TYRE_COL[pl.compound] || '#e8202a';
   ef.classList.toggle('dep', p.ersDeploying);
   const drs = $('drs');
   drs.className = 'drs' + (pl.drsOpen ? ' open' : pl.drsAllowed ? ' avail' : '');
@@ -1318,7 +1460,9 @@ function updateHUD(dt) {
         const lapsDown = Math.floor((order[0].totalDist - c.totalDist) / L);
         gap = lapsDown >= 1 && !order[0].finished ? `+${lapsDown} LAP` : race.started && c.gapLeader > 0 ? '+' + c.gapLeader.toFixed(3) : '';
       }
-      r.children[3].innerHTML = gap + (c.drsOpen ? '<span class="drsb">DRS</span>' : '') + (race.fastest && race.fastest.car === c ? '<span class="fl"></span>' : '');
+      const inPit = !c.retired && track.inPitCorridor(c.proj.i, c.proj.d) && (c.isPlayer ? race.inPitLane : c.ai?.pit);
+      if (c.retired) gap = 'OUT';
+      r.children[3].innerHTML = gap + (inPit ? '<span class="pitb">PIT</span>' : '') + (c.drsOpen ? '<span class="drsb">DRS</span>' : '') + (race.fastest && race.fastest.car === c ? '<span class="fl"></span>' : '');
     });
     if (race.mode === 'tt' && race.bestTT) $('hud-best').textContent = fmt(race.bestTT);
   }
@@ -1464,7 +1608,6 @@ function frame(now) {
   if (inp.box || boxClicked) { boxClicked = false; togglePitRequest(); }
   // online races keep running while you pause (your car parks itself, see playerControls)
   if (mp || (!paused && !guideOpen)) {
-    if (inp.reset && race.started && !race.player.finished && !race.player.frozen && !paused) respawnCar(race.player);
     stepRace(dt, paused || guideOpen ? { ...inp, throttle: 0, drs: false } : inp);
     updateEvents(dt);
     updateCarVisuals(dt);
@@ -1511,7 +1654,8 @@ function toMenu(keepOnline) {
   endEvent();
   state = 'menu';
   mp = null;
-  document.body.classList.remove('mp', 'mp-host');
+  applyBloom();
+  document.body.classList.remove('mp', 'mp-host', 'cockpit-cam');
   radio?.stop();
   weather?.hideLens();
   audio.setRain(false);
