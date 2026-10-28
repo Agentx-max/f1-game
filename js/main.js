@@ -763,7 +763,10 @@ function stepRace(dt, inp) {
   }
 
   // finish handling (online: results come from the server's 'end' message)
-  if (!mp && pl.finished && !race.resultsShown && race.time - race.playerFinishedAt > 4) { race.resultsShown = true; showResults(); }
+  // the results screen waits for the victory radio to finish (capped, in case audio stalls)
+  const radioHold = radio?.busy && race.time - race.playerFinishedAt < 16;
+  if (!mp && pl.finished && !race.resultsShown && race.time - race.playerFinishedAt > 4 && !radioHold) { race.resultsShown = true; showResults(); }
+  if (race.pendingResults && !radioHold) { const why = race.pendingResults.why; race.pendingResults = null; showResults(why); }
   if (mp) mpSend(dt);
 }
 
@@ -845,6 +848,7 @@ function mpFinish(f) {
     race.reward = raceReward({ pos: f.order, laps: race.laps, aiSkill: mp.settings.aiDiff, fastestLap: race.fastest && race.fastest.car === c, gained: race.gridPos - f.order, handling: settings.handling });
     progress.add(race.reward.total);
     showMsg(`🏁 FINISHED P${f.order}`, f.order === 1 ? 'purple' : 'red', 4);
+    if (f.order === 1 && isMax(c)) radio?.victory();
   }
 }
 
@@ -854,7 +858,11 @@ function mpEnd(msg) {
   // classification: finishers by order, then everyone still running by distance, DNFs last
   const rank = c => (c.netFinished ? c.finishOrder : 1000 + (c.dnf ? 1e6 : 0) - c.totalDist / 1e5);
   race.order = [...race.cars].sort((a, b) => rank(a) - rank(b));
-  if (state === 'race' && !race.resultsShown) { race.resultsShown = true; showResults(msg.why); }
+  if (state === 'race' && !race.resultsShown) {
+    race.resultsShown = true;
+    if (radio?.busy) race.pendingResults = { why: msg.why }; // let the victory radio finish first
+    else showResults(msg.why);
+  }
 }
 
 // ---------------------------------------------------------------- events: marshal rescue, pit stops, tyre wear, coins
@@ -1151,11 +1159,15 @@ function completeLap(c, lapNow) {
       race.reward = raceReward({ pos: c.finishOrder, laps: race.laps, aiSkill: settings.diff, fastestLap: race.fastest && race.fastest.car === c, gained: race.gridPos - c.finishOrder, handling: settings.handling });
       progress.add(race.reward.total);
       showMsg(`🏁 FINISHED P${c.finishOrder}`, c.finishOrder === 1 ? 'purple' : 'red', 4);
+      if (c.finishOrder === 1 && isMax(c)) radio?.victory();
     }
   }
   if (race.mode === 'race' && c.isPlayer && lapNow === race.laps - 1) showMsg('FINAL LAP', 'red', 2);
   if (c.isPlayer && engineer && lapNow < race.laps) engineer.onLap(lapNow, race);
 }
+
+// the car is driven as Max Verstappen (single player or online)
+const isMax = c => !!c.driver && (c.driver.code === 'VER' || /verstappen/i.test(c.driver.name || ''));
 
 function onWallHit(car, x, z, v) {
   // a big AI shunt can end their race (single player only, a few per race at most)

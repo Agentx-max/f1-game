@@ -348,7 +348,8 @@ export class PitStop {
     else { of.reset(); of.body({ y: 0.95 - 0.25 * Math.max(grab, 0.4) + carry * 0.12, lean: 0.25 + 0.3 * grab - carry * 0.15, headPitch: -0.25 }); }
     of.update();
     if (!(mv > 0.35 && carry > 0.02 && carry < 0.98)) of.stance([0.17, 0.05, -0.17, -0.12], { R: { pitch: 0.15 } });
-    this.tyreHands(of, W.oldT, s, W.fz, W.w, grab * (t >= W.tAway[1] + 2.5 ? 0 : 1) * base);
+    const dropped = t >= 0 && W.tAway && t >= W.tAway[1] + 2.5;
+    this.tyreHands(of, W.oldT, s, W.fz, W.w, grab * (dropped ? 0 : 1) * base);
     // ---- new tyre: carried in, lined up with the hub and pushed on
     let nx = W.xo + 0.66, ny = R + 0.1, nz = W.z - W.fz * 0.36, held = 1;
     if (t >= 0) {
