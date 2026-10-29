@@ -46,6 +46,9 @@ for (const f of ['favicon.svg', 'manifest.webmanifest']) fs.copyFileSync(path.jo
 // optional recorded team-radio voice clips (radio/<id>.mp3 + manifest.json); without them the browser voice is used
 const radioDir = path.join(root, 'radio');
 if (fs.existsSync(radioDir)) fs.cpSync(radioDir, path.join(dist, 'radio'), { recursive: true });
+// 3D models (GLB)
+const modelsDir = path.join(root, 'models');
+if (fs.existsSync(modelsDir)) fs.cpSync(modelsDir, path.join(dist, 'models'), { recursive: true });
 
 // Netlify: page always revalidated, versioned assets cached for a year
 fs.writeFileSync(path.join(dist, '_headers'), [
@@ -54,6 +57,7 @@ fs.writeFileSync(path.join(dist, '_headers'), [
   '/index.html', '  Cache-Control: no-cache',
   '/game.js', '  Cache-Control: public, max-age=31536000, immutable',
   '/css/*', '  Cache-Control: public, max-age=31536000, immutable',
+  '/models/*', '  Cache-Control: public, max-age=31536000, immutable',
   '/manifest.webmanifest', '  Content-Type: application/manifest+json', '  Cache-Control: no-cache',
   '',
 ].join('\n'));

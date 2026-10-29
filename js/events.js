@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { makePerson, lerpAngle, MARSHAL_FLAG, MARSHAL_TRACK, crewCostume, makeWheelGun, makeJack, makeExtinguisher } from './crew.js';
+import { makeFlagMarshal } from './flagMarshal.js';
 import { FRONT_AXLE, REAR_AXLE, WHEEL_R, makeWheelProp } from './car.js';
 import { smooth, smoother } from './ik.js';
 
@@ -34,12 +35,13 @@ export class Rescue {
     this.slots = [slot(0.42, -3.32, ...rear), slot(-0.42, -3.32, ...rear.map(mir)), slot(1.1, -1.05, ...side), slot(-1.1, -1.05, ...side.map(mir)), null];
     const costumes = [MARSHAL_FLAG, MARSHAL_TRACK, MARSHAL_TRACK, MARSHAL_FLAG, MARSHAL_FLAG];
     this.people = this.slots.map((sl, k) => {
-      const person = makePerson({ costume: costumes[k] });
+      const isFlag = !sl;
+      const person = isFlag ? makeFlagMarshal() : makePerson({ costume: costumes[k] });
       const sp = tr.pointAt(car.proj.s - 10 + k * 5 - (sl ? 0 : 22), this.side * (wall + 1.6 + (k % 2) * 0.8));
       person.root.position.set(sp.x, sp.y - 0.5, sp.z);
-      if (!sl) person.attachFlag('#ffd400');
+      if (isFlag && !person.isGLB) person.attachFlag('#ffd400');
       scene.add(person.root);
-      return { person, slot: sl, flag: !sl, spawn: new THREE.Vector3(sp.x, sp.y - 0.5, sp.z), delay: sl ? k * 0.18 : 0, grab: 0 };
+      return { person, slot: sl, flag: isFlag, spawn: new THREE.Vector3(sp.x, sp.y - 0.5, sp.z), delay: sl ? k * 0.18 : 0, grab: 0 };
     });
     this.tmp = {}; this.proj = {}; this.hv = new THREE.Vector3();
   }
@@ -73,6 +75,7 @@ export class Rescue {
       per.root.updateMatrixWorld();
       per.waveFlag(this.t);
     } else if (per.flag) per.flag.userData.update(this.t);
+    if (per.isGLB) per.update(dt);
   }
 
   // hands on the car body (car-local points)
@@ -178,7 +181,10 @@ export class Rescue {
   finish() {
     if (this.done) return;
     this.done = true;
-    for (const m of this.people) this.scene.remove(m.person.root);
+    for (const m of this.people) {
+      this.scene.remove(m.person.root);
+      if (m.person.dispose) m.person.dispose();
+    }
   }
 }
 

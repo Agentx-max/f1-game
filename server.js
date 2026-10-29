@@ -23,6 +23,7 @@ const types = {
   '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2',
   '.webmanifest': 'application/manifest+json',
+  '.glb': 'model/gltf-binary',
 };
 // never serve server code, tooling or dependencies other than three.js (needed by the dev importmap)
 const blocked = p => /(^|[\\/])(\.git|netcode|tools)([\\/]|$)/.test(p)
